@@ -187,6 +187,7 @@ use `--image-prompt name-and-class` for prompts such as "iris scissors".
 A second pass refines a padded crop by default; disable it with
 `--no-refine-crop`.
 
+
 In the terminal review prompt:
 
 - `a` accepts all candidates; `a 0,2` accepts selected candidates.
