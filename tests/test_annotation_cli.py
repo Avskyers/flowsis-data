@@ -72,7 +72,7 @@ def test_image_cli_writes_local_outputs_and_resumes(tmp_path, monkeypatch, empty
 @pytest.mark.parametrize("skipped_first", [False, True])
 def test_skipped_priority_is_stable_across_batches(tmp_path, monkeypatch, skipped_first):
     monkeypatch.chdir(tmp_path)
-    argv = ["annotate.py", "images", "--batch-size", "2"]
+    argv = ["annotate.py", "images", "--single-tool", "--batch-size", "2"]
     if skipped_first:
         argv.append("--skipped-first")
     monkeypatch.setattr(sys, "argv", argv)

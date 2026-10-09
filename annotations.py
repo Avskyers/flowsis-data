@@ -49,39 +49,16 @@ IMAGE_OBJECT_FIELDS = (
     "Annotation Confidence",
 )
 VIDEO_MANIFEST_FIELDS = (
-    "Video ID",
-    "Filepath",
-    "FPS",
-    "Frame Count",
-    "Width",
-    "Height",
-    CAPTURE_SESSION_FIELD,
-    "Condition",
+    "Tool ID", "Tool Class", "Tool Name", "Confidence", "Video ID", "Filepath",
+    "FPS", "Frame Count", "Width", "Height", CAPTURE_SESSION_FIELD, "Condition",
+    "Source SHA256", "Extraction ID", "Extraction Complete",
 )
-VIDEO_OBJECT_FIELDS = (
-    "Video ID",
-    "Frame Index",
-    "Track ID",
-    "Tool ID",
-    "Tool Class",
-    "Tool Name",
-    "BBox X",
-    "BBox Y",
-    "BBox Width",
-    "BBox Height",
-    "Mask Path",
-    "Mask Index",
-    "Visibility",
-    "Reviewed",
-    "Annotation Complete",
-    "Mask Valid",
-    "Class Valid",
-    "Base Valid",
-    "Visible",
-    "Annotation Confidence",
-    "Preferred Track",
+VIDEO_FRAME_FIELDS = (
+    "Video ID", "Frame Index", "Timestamp Seconds", "Filepath", "Frame ID", "Frame SHA256",
+    "BBox X", "BBox Y", "BBox Width", "BBox Height", "Mask Path", "Mask Index",
+    "Visibility", "Reviewed", "Annotation Complete", "Mask Valid", "Class Valid",
+    "Base Valid", "Visible", "Annotation Confidence", "Review Status", "Anchor Path",
 )
-
 
 def parse_bool(value: object, *, default: bool = False) -> bool:
     if value is None or value == "":
@@ -337,3 +314,32 @@ def write_image_manifests(
             )
     write_csv(object_manifest, ordered_objects, IMAGE_OBJECT_FIELDS)
     write_csv(manifest, ordered_images, fields)
+
+
+def validate_instance_metadata(instances: Sequence[Mapping[str, str]]) -> None:
+    """Validate declared physical identities before inference or acceptance."""
+    identities: set[str] = set()
+    tools: set[str] = set()
+    for row in instances:
+        for field in (
+            IMAGE_ID_FIELD,
+            "Instance ID",
+            "Tool ID",
+            "Tool Class",
+            "Tool Name",
+        ):
+            if not row.get(field, "").strip():
+                raise ValueError(f"Instance metadata requires {field}.")
+        identity, tool = row["Instance ID"], row["Tool ID"]
+        if identity in identities or tool in tools:
+            raise ValueError(
+                "Instance IDs and physical Tool IDs must be unique within an image."
+            )
+        identities.add(identity)
+        tools.add(tool)
+        try:
+            valid = 0 <= float(row.get("Confidence", "")) <= 1
+        except ValueError:
+            valid = False
+        if not valid:
+            raise ValueError(f"Instance {identity}: Confidence must be from 0 to 1.")

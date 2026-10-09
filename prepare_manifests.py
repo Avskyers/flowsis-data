@@ -1,3 +1,5 @@
+"""Prepare image and object manifests from single-tool or declared multi-tool captures."""
+
 import csv
 import unicodedata
 from datetime import datetime
@@ -316,12 +318,41 @@ def main(
     objects_by_image: dict[str, list[dict[str, str]]] = {}
     for obj in objects:
         objects_by_image.setdefault(obj["Image ID"], []).append(obj)
+    multi_dir = images_dir / "multi"
+    multi_relative = multi_dir.relative_to(manifest_path.parent)
     missing_instances = [
-        row["Filepath"] for row in rows
+        row["Filepath"]
+        for row in rows
         if not objects_by_image.get(row["Image ID"])
+        and not Path(row["Filepath"]).is_relative_to(multi_relative)
     ]
     if missing_instances:
         raise ValueError(f"Images have no instance metadata: {missing_instances}")
+
+    # multi/ is organizational: its name must never become a physical Tool ID.
+    by_filepath = {row["Filepath"]: row for row in rows}
+    undeclared_multi = {
+        row["Filepath"]
+        for row in rows
+        if Path(row["Filepath"]).is_relative_to(multi_relative)
+        and not objects_by_image.get(row["Image ID"])
+    }
+    for image in find_images(multi_dir):
+        filepath = image.relative_to(manifest_path.parent).as_posix()
+        if filepath not in by_filepath:
+            undeclared_multi.add(filepath)
+    if undeclared_multi:
+        print(
+            "Multi-tool images require explicit instance declarations (automatic intake skipped):"
+        )
+        for filepath in sorted(undeclared_multi):
+            print(f"- {filepath}")
+        print(
+            "Run python annotate.py declare --filepath IMAGE --tool-id ID "
+            '--tool-class "CLASS" --tool-name "NAME" --confidence 0.9 '
+            "for each physical tool in each image. Repeat --filepath for several images. "
+            "Then assign Sample ID and Angle in image_manifest.csv and rerun prepare_manifests.py."
+        )
 
     normalized_labels = 0
     for row in objects:
@@ -357,13 +388,16 @@ def main(
                 metadata_updates += 1
 
     tool_dirs = sorted(
-        (path for path in images_dir.iterdir() if path.is_dir()),
+        (
+            path
+            for path in images_dir.iterdir()
+            if path.is_dir() and path.name != "multi"
+        ),
         key=lambda path: sort_key(path.name),
     )
     rows_by_tool = {
         tool_dir.name: [
-            row for row in rows
-            if Path(row["Filepath"]).parts[1] == tool_dir.name
+            row for row in rows if Path(row["Filepath"]).parts[1] == tool_dir.name
         ]
         for tool_dir in tool_dirs
     }
@@ -413,13 +447,12 @@ def main(
                 continue
 
         existing_objects = [
-            obj for row in existing_rows
-            for obj in objects_by_image[row["Image ID"]]
+            obj for row in existing_rows for obj in objects_by_image[row["Image ID"]]
         ]
         if any(len(objects_by_image[row["Image ID"]]) != 1 for row in existing_rows):
             raise ValueError(
                 f"Folder {tool_id} contains multi-tool images. Add instance metadata "
-                "explicitly; basic.py only infers metadata for single-tool folders."
+                "explicitly; prepare_manifests.py only infers metadata for single-tool folders."
             )
         if existing_rows:
             tool_class = next(
@@ -476,14 +509,16 @@ def main(
                     print(f"Warning: could not read metadata from {source}: {error}")
 
             obj = dict.fromkeys(IMAGE_OBJECT_FIELDS, "")
-            obj.update({
-                "Image ID": row["Image ID"],
-                "Instance ID": "instance-0",
-                "Tool ID": tool_id,
-                "Tool Class": tool_class,
-                "Tool Name": tool_name,
-                "Confidence": confidence,
-            })
+            obj.update(
+                {
+                    "Image ID": row["Image ID"],
+                    "Instance ID": "instance-0",
+                    "Tool ID": tool_id,
+                    "Tool Class": tool_class,
+                    "Tool Name": tool_name,
+                    "Confidence": confidence,
+                }
+            )
             objects.append(obj)
             objects_by_image[row["Image ID"]] = [obj]
             rows.append(row)
@@ -516,7 +551,9 @@ def main(
         if not row["Capture Session ID"]:
             row["Capture Session ID"] = session
     write_image_manifests(manifest_path, rows, object_manifest_path, objects)
-    print("Refreshed manifest navigation columns and sorted by completion and tool IDs.")
+    print(
+        "Refreshed manifest navigation columns and sorted by completion and tool IDs."
+    )
 
     if metadata_updates:
         print(f"Filled {metadata_updates} empty metadata field(s).")

@@ -10,7 +10,13 @@ from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
-from annotations import numeric_sort_key, tool_id_summary
+from annotations import (
+    numeric_sort_key,
+    tool_id_summary,
+    parse_bool,
+    validate_instance_metadata,
+)
+from masks import load_mask_bundle, mask2xywh
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps, UnidentifiedImageError
 
@@ -145,6 +151,80 @@ def resolved_manifest_image(filepath: str) -> Path | None:
     return path
 
 
+def validate_image_annotations(
+    image: dict[str, str], instances: list[dict[str, str]]
+) -> list[dict[str, str]]:
+    """Check reviewed instance rows against their shared mask bundle."""
+    location = image["Filepath"]
+    try:
+        complete = [parse_bool(row.get("Annotation Complete")) for row in instances]
+        if not any(complete):
+            return []
+        if not all(complete):
+            raise ValueError("Completed image has unresolved instance rows.")
+        validate_instance_metadata(instances)
+        visible = []
+        for row in instances:
+            state = row.get("Visibility", "")
+            if state not in {"clear", "partial", "severe", "occluded", "absent"}:
+                raise ValueError("Completed instance has invalid visibility.")
+            positive = state in {"clear", "partial", "severe"}
+            if parse_bool(row.get("Reviewed")) != positive:
+                raise ValueError(
+                    "Visible instances require reviewed masks; nonvisible instances must be metadata-only."
+                )
+            if (
+                parse_bool(row.get("Visible")) != positive
+                or parse_bool(row.get("Mask Valid")) != positive
+            ):
+                raise ValueError("Visibility and mask validity flags disagree.")
+            class_valid = positive and state != "severe"
+            if (
+                parse_bool(row.get("Class Valid")) != class_valid
+                or parse_bool(row.get("Base Valid")) != class_valid
+            ):
+                raise ValueError("Class/base validity flags disagree with visibility.")
+            if positive:
+                if not row.get("Mask Path"):
+                    raise ValueError("Visible instance has no mask path.")
+                visible.append(row)
+            elif row.get("Mask Path") or row.get("Mask Index", "") not in {"", "-1"}:
+                raise ValueError(
+                    "Absent or occluded instance references a positive mask."
+                )
+        paths = {row["Mask Path"] for row in visible}
+        if not visible:
+            return []
+        if len(paths) != 1:
+            raise ValueError("Image instances must reference one shared mask bundle.")
+        bundle = load_mask_bundle(ROOT / next(iter(paths)))
+        if len(set(bundle.identities)) != len(bundle.identities):
+            raise ValueError("Mask bundle contains duplicate instance identities.")
+        indices = [int(row["Mask Index"]) for row in visible]
+        if set(indices) != set(range(len(bundle.identities))) or len(indices) != len(
+            bundle.identities
+        ):
+            raise ValueError("Mask indices must cover the bundle exactly once.")
+        for row, index in zip(visible, indices, strict=True):
+            if bundle.identities[index] != row["Instance ID"]:
+                raise ValueError("Mask identity disagrees with its instance row.")
+            box = mask2xywh(bundle.masks[index])
+            recorded = [
+                int(row[field])
+                for field in ("BBox X", "BBox Y", "BBox Width", "BBox Height")
+            ]
+            if box != recorded:
+                raise ValueError("Bounding box disagrees with the instance mask.")
+        path = resolved_manifest_image(location)
+        if path is not None and path.is_file():
+            with Image.open(path) as source:
+                if bundle.masks.shape[1:] != (source.height, source.width):
+                    raise ValueError("Mask dimensions disagree with the image.")
+    except (ValueError, OSError, KeyError, IndexError, TypeError) as error:
+        return [issue("error", "invalid_annotation", location, str(error))]
+    return []
+
+
 def validate_manifest(
     rows: list[dict[str, str]],
     objects: list[dict[str, str]],
@@ -182,7 +262,7 @@ def validate_manifest(
                 if obj.get(field, "") != image.get(field, ""):
                     issues.append(issue(
                         "error", "stale_instance_reference", location,
-                        f"{field} differs from the image manifest. Run basic.py to refresh it.",
+                        f"{field} differs from the image manifest. Run prepare_manifests.py to refresh it.",
                     ))
         by_image[obj["Image ID"]].append(obj)
     for row in rows:
@@ -192,8 +272,9 @@ def validate_manifest(
         if row.get("Tool IDs", "") != tool_id_summary(instances):
             issues.append(issue(
                 "error", "stale_tool_summary", row["Filepath"],
-                "Tool IDs differs from instance metadata. Run basic.py to refresh it.",
+                "Tool IDs differs from instance metadata. Run prepare_manifests.py to refresh it.",
             ))
+        issues.extend(validate_image_annotations(row, instances))
         # Joined strings are only for the report; CSV storage stays one row per instance.
         for field in ("Tool ID", "Tool Class", "Tool Name"):
             row[field] = "; ".join(obj[field] for obj in instances)

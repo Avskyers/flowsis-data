@@ -5,6 +5,7 @@ dependencies:
   - python=3.13
   - numpy
   - opencv
+  - av
   - pillow
   - pytorch
   - torchvision

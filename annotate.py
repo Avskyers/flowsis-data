@@ -3,11 +3,10 @@ from __future__ import annotations
 import argparse
 import json
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-import cv2
 import numpy as np
 import torch
 from numpy.typing import NDArray
@@ -17,8 +16,6 @@ from annotations import (
     CAPTURE_SESSION_FIELD,
     IMAGE_ID_FIELD,
     IMAGE_OBJECT_FIELDS,
-    VIDEO_MANIFEST_FIELDS,
-    VIDEO_OBJECT_FIELDS,
     canonical_tool_label,
     extend_image_manifest,
     image_mask_path,
@@ -28,17 +25,10 @@ from annotations import (
     stable_media_id,
     write_csv,
     write_image_manifests,
+    validate_instance_metadata,
 )
 from masks import mask2xywh, save_mask_bundle
-
-
-@dataclass(frozen=True)
-class Candidate:
-    mask: NDArray[np.bool_]
-    score: float
-    prompt: str
-    identity: str
-    visibility: str = "clear"
+from image_review import Candidate, review_image_instances
 
 
 class ReviewLog:
@@ -149,7 +139,11 @@ def image_prompt(row: Mapping[str, str], style: str, aliases: Mapping[str, str])
 
 
 def show_candidates(
-    image: Image.Image, candidates: Sequence[Candidate], title: str
+    image: Image.Image,
+    candidates: Sequence[Candidate],
+    title: str,
+    *,
+    focus: bool = False,
 ) -> None:
     import matplotlib.pyplot as plt
 
@@ -175,7 +169,7 @@ def show_candidates(
             axis.add_patch(
                 plt.Rectangle((x, y), width, height, fill=False, color=colors(index))
             )
-    if boxes:
+    if boxes and focus:
         left = min(box[0] for box in boxes)
         top = min(box[1] for box in boxes)
         right = max(box[0] + box[2] for box in boxes)
@@ -223,7 +217,7 @@ def review_candidates(
     visibility_by_index = {index: "clear" for index in range(len(candidates))}
     ignored_indices: set[int] = set()
     while True:
-        show_candidates(image, candidates, key)
+        show_candidates(image, candidates, key, focus=True)
         print(
             "a [0,2]=accept, e=accept empty, r=reject, s=skip, "
             "p TEXT=re-prompt, i [0,2]=mark ignore regions, "
@@ -356,7 +350,6 @@ class Sam3ImageBackend:
         for index, (image, prompt, initial) in enumerate(
             zip(images, prompts, candidates, strict=True)
         ):
-            initial = deduplicate_candidates(initial)
             if len(initial) != 1:
                 continue
             box = mask2xywh(initial[0].mask)
@@ -397,7 +390,7 @@ class Sam3ImageBackend:
                 continue
             full_mask = np.zeros((image.height, image.width), dtype=np.bool_)
             full_mask[top:bottom, left:right] = mask
-            original = deduplicate_candidates(candidates[index])[0]
+            original = candidates[index][0]
             candidates[index] = [
                 replace(candidate, mask=full_mask, identity=original.identity)
             ]
@@ -425,7 +418,7 @@ class Sam3ImageBackend:
 
 def _visibility_flags(visibility: str) -> dict[str, str]:
     severe = visibility == "severe"
-    visible = visibility != "occluded"
+    visible = visibility not in {"occluded", "absent"}
     return {
         "Visibility": visibility,
         "Reviewed": "TRUE",
@@ -452,55 +445,62 @@ def _replace_scope(
     return retained + replacements
 
 
-def _image_object_rows(
-    source: Mapping[str, str],
-    candidates: Sequence[Candidate],
+def resolved_image_rows(
+    instances: Sequence[Mapping[str, str]],
+    selected: Sequence[Candidate],
     mask_path: Path,
-    intended_prompt: str,
 ) -> list[dict[str, object]]:
+    """Produce rows and bundle indices from explicitly resolved tool identities."""
+    validate_instance_metadata(instances)
+    by_id = {candidate.identity: candidate for candidate in selected}
+    if len(by_id) != len(selected) or set(by_id) != {
+        row["Instance ID"] for row in instances
+    }:
+        raise ValueError(
+            "Every declared instance must have exactly one resolved annotation."
+        )
     rows = []
-    intended_indices = [
-        index
-        for index, candidate in enumerate(candidates)
-        if candidate.prompt.casefold() == intended_prompt.casefold()
-        and candidate.identity.startswith("instance-")
-    ]
-    intended_index = (
-        0
-        if len(candidates) == 1
-        else (intended_indices[0] if intended_indices else None)
-    )
-    for index, candidate in enumerate(candidates):
+    indices = {
+        candidate.identity: index
+        for index, candidate in enumerate(
+            candidate for candidate in selected if candidate.mask.any()
+        )
+    }
+    for source in instances:
+        candidate = by_id[source["Instance ID"]]
         box = mask2xywh(candidate.mask)
-        if box is None:
-            continue
-        rows.append(
+        if candidate.visibility not in {
+            "clear",
+            "partial",
+            "severe",
+            "occluded",
+            "absent",
+        }:
+            raise ValueError("Invalid resolved visibility.")
+        visible = candidate.visibility in {"clear", "partial", "severe"}
+        if visible != (box is not None):
+            raise ValueError(
+                "Visible tools require masks; absent or occluded tools require empty masks."
+            )
+        row: dict[str, object] = {
+            field: source.get(field, "") for field in IMAGE_OBJECT_FIELDS
+        }
+        row.update(
             {
-                IMAGE_ID_FIELD: source[IMAGE_ID_FIELD],
-                "Instance ID": candidate.identity,
-                "Tool ID": (
-                    source.get("Tool ID", "") if index == intended_index else ""
-                ),
-                "Tool Class": (
-                    source.get("Tool Class", "") if index == intended_index else ""
-                ),
-                "Tool Name": (
-                    source.get("Tool Name", "")
-                    if index == intended_index
-                    else candidate.prompt
-                ),
-                "Confidence": (
-                    source.get("Confidence", "") if index == intended_index else ""
-                ),
-                "BBox X": box[0],
-                "BBox Y": box[1],
-                "BBox Width": box[2],
-                "BBox Height": box[3],
-                "Mask Path": str(mask_path),
-                "Mask Index": index,
+                "BBox X": box[0] if box else "",
+                "BBox Y": box[1] if box else "",
+                "BBox Width": box[2] if box else "",
+                "BBox Height": box[3] if box else "",
+                "Mask Path": str(mask_path) if visible else "",
+                "Mask Index": indices[candidate.identity] if visible else -1,
                 **_visibility_flags(candidate.visibility),
             }
         )
+        if not visible:
+            # The existing training builder consumes Reviewed mask rows only.
+            # Retain resolution and identity without presenting a positive annotation.
+            row["Reviewed"] = "FALSE"
+        rows.append(row)
     return rows
 
 
@@ -513,27 +513,32 @@ def annotate_images(args: argparse.Namespace) -> None:
     object_rows: list[dict[str, object]] = (
         list(read_csv(args.object_manifest)) if args.object_manifest.is_file() else []
     )
-    sources: dict[str, dict[str, str]] = {}
-    for row in rows:
-        instances = [
-            obj for obj in object_rows
-            if obj[IMAGE_ID_FIELD] == row[IMAGE_ID_FIELD]
-        ]
-        if len(instances) == 1:
-            sources[row[IMAGE_ID_FIELD]] = {
-                **{key: str(value) for key, value in instances[0].items()}, **row
-            }
+    sources: dict[str, list[dict[str, str]]] = {}
+    for obj in object_rows:
+        sources.setdefault(str(obj[IMAGE_ID_FIELD]), []).append(
+            {field: str(value) for field, value in obj.items()}
+        )
     review = ReviewLog(args.review_log)
     for row in rows:
-        if (
-            not review.completed(row[IMAGE_ID_FIELD])
-            and row[IMAGE_ID_FIELD] not in sources
-        ):
+        if review.completed(row[IMAGE_ID_FIELD]):
+            continue
+        instances = sources.get(row[IMAGE_ID_FIELD], [])
+        if not instances:
             raise ValueError(
-                f"{row['Filepath']} requires exactly one declared instance for this "
-                "annotation workflow. Run basic.py to add instance metadata."
+                f"{row['Filepath']} has no declared instances. Run prepare_manifests.py or annotate.py declare."
             )
-    device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
+        validate_instance_metadata(instances)
+        if len(instances) > 1 and args.single_tool:
+            raise ValueError(
+                f"{row['Filepath']}: --single-tool cannot merge multiple declared tools."
+            )
+        if len(instances) > 1 and args.auto_accept:
+            raise ValueError(
+                "Multi-tool images require explicit review; --auto-accept cannot assign identities."
+            )
+    device = torch.device(
+        args.device or ("cuda" if torch.cuda.is_available() else "cpu")
+    )
     backend = Sam3ImageBackend(
         args.model,
         device,
@@ -550,315 +555,266 @@ def annotate_images(args: argparse.Namespace) -> None:
         print(
             f"Skipping {len(missing)} manifest images that are not present below {root}."
         )
-
     queue = [
-        row for row in rows
+        row
+        for row in rows
         if not review.completed(row[IMAGE_ID_FIELD])
         and (root / row["Filepath"]).is_file()
     ]
     queue.sort(
         key=lambda row: (
             review.decisions.get(row[IMAGE_ID_FIELD], {}).get("decision") == "skipped"
-        ) != args.skipped_first
+        )
+        != args.skipped_first
     )
     for offset in range(0, len(queue), args.batch_size):
         pending = queue[offset : offset + args.batch_size]
         images = [Image.open(root / row["Filepath"]).convert("RGB") for row in pending]
-        prompts = [
-            image_prompt(sources[row[IMAGE_ID_FIELD]], args.image_prompt, aliases)
-            for row in pending
-        ]
-        predicted = backend.predict(images, prompts)
-        discovery_prompts = tuple(
-            normalize_tool_name(prompt, aliases)
-            for prompt in tuple(args.discovery_prompt or ())
-            + tuple(args.canonical_prompt or ())
-        )
-        for discovery_prompt in discovery_prompts:
-            discovered = backend.predict(images, [discovery_prompt] * len(images))
-            for image_index, candidates in enumerate(discovered):
-                predicted[image_index].extend(
-                    Candidate(
-                        candidate.mask,
-                        candidate.score,
-                        candidate.prompt,
-                        f"{stable_media_id('prompt', discovery_prompt)}-{candidate.identity}",
+        prompt_lists = []
+        for row in pending:
+            prompt_lists.append(
+                list(
+                    dict.fromkeys(
+                        [
+                            image_prompt(instance, args.image_prompt, aliases)
+                            for instance in sources[row[IMAGE_ID_FIELD]]
+                        ]
+                        + [
+                            normalize_tool_name(prompt, aliases)
+                            for prompt in [
+                                *(args.discovery_prompt or []),
+                                *(args.canonical_prompt or []),
+                            ]
+                        ]
                     )
-                    for candidate in candidates
                 )
-        for row, image, initial in zip(pending, images, predicted, strict=True):
+            )
+        # A mixed batch also keeps single-tool candidates unchanged for review.
+        multi_batch = any(len(sources[row[IMAGE_ID_FIELD]]) > 1 for row in pending)
+        original_refine = getattr(backend, "refine_crop", args.refine_crop)
+        if multi_batch:
+            backend.refine_crop = False
+        predicted = backend.predict(images, [prompts[0] for prompts in prompt_lists])
+        for index, prompts in enumerate(prompt_lists):
+            for prompt in prompts[1:]:
+                predicted[index].extend(backend.predict([images[index]], [prompt])[0])
+        for row, image, initial, prompts in zip(
+            pending, images, predicted, prompt_lists, strict=True
+        ):
             key = row[IMAGE_ID_FIELD]
-            active_prompt = prompts[pending.index(row)]
-            candidates = deduplicate_candidates(initial)
-            while True:
-                decision, selected, ignored, replacement_prompt, visibility = (
-                    review_candidates(
-                        image,
-                        candidates,
-                        key=key,
-                        auto_accept=args.auto_accept,
-                        review_log=review,
-                    )
+            instances = sources[key]
+            active_prompt = prompts[0]
+            candidates = [
+                replace(candidate, identity=f"candidate-{index}")
+                for index, candidate in enumerate(initial)
+            ]
+            explicit = (
+                len(instances) > 1
+                or len(candidates) > 1
+                or len(prompts) > 1
+                or (not args.single_tool and not args.auto_accept)
+            )
+            while not explicit:
+                decision, selected, ignored, replacement_prompt, _ = review_candidates(
+                    image,
+                    candidates,
+                    key=key,
+                    auto_accept=args.auto_accept,
+                    review_log=review,
                 )
                 if decision != "reprompt":
                     break
                 assert replacement_prompt is not None
-                replacement_prompt = normalize_tool_name(replacement_prompt, aliases)
-                active_prompt = replacement_prompt
-                candidates = deduplicate_candidates(
-                    backend.predict([image], [replacement_prompt])[0]
+                active_prompt = normalize_tool_name(replacement_prompt, aliases)
+                candidates = backend.predict([image], [active_prompt])[0]
+                explicit = len(candidates) > 1
+            if explicit:
+                if args.auto_accept:
+                    raise ValueError(
+                        "Ambiguous candidates require explicit assignment; disable --auto-accept."
+                    )
+                for left in range(len(candidates)):
+                    for right in range(left + 1, len(candidates)):
+                        if (
+                            mask_iou(candidates[left].mask, candidates[right].mask)
+                            >= 0.9
+                        ):
+                            print(
+                                f"Possible duplicate candidates: {left}, {right}. Both retained for review."
+                            )
+                # Reprompting appends candidates without replacing assigned fragments.
+                backend.refine_crop = False
+                result = review_image_instances(
+                    image,
+                    candidates,
+                    instances,
+                    key=key,
+                    show=show_candidates,
+                    predict=lambda prompt: backend.predict(
+                        [image], [normalize_tool_name(prompt, aliases)]
+                    )[0],
+                    log=review.append,
                 )
+                decision, selected, ignored = (
+                    result.decision,
+                    result.selected,
+                    result.ignored,
+                )
+                instances = result.instances
+            elif decision == "accepted" and selected:
+                selected = [replace(selected[0], identity=instances[0]["Instance ID"])]
+            backend.refine_crop = False if multi_batch else original_refine
             if decision == "quit":
                 return
-            if decision == "skipped":
-                review.append(key, decision, prompt=active_prompt)
-                continue
             if decision == "accepted":
-                source = sources[key]
-                if len(selected) == 1:
-                    selected = [replace(selected[0], identity=source["Instance ID"])]
                 mask_path = image_mask_path(args.mask_dir, row["Filepath"])
-                height, width = np.asarray(image).shape[:2]
-                masks = (
-                    np.stack([candidate.mask for candidate in selected])
-                    if selected
-                    else np.zeros((0, height, width), dtype=np.bool_)
-                )
-                save_mask_bundle(
-                    mask_path,
-                    masks,
-                    [candidate.identity for candidate in selected],
-                    ignore=(
-                        np.logical_or.reduce([candidate.mask for candidate in ignored])
-                        if ignored
-                        else None
-                    ),
-                )
-                normalized_row = {
-                    **source,
-                    "Tool Name": normalize_tool_name(source["Tool Name"], aliases),
-                }
-                replacements = _image_object_rows(
-                    normalized_row,
-                    selected,
-                    mask_path,
-                    active_prompt,
-                )
-                if not replacements:
-                    # An accepted empty mask must not erase the capture's identity.
-                    replacements = [{
-                        field: source.get(field, "") if field in {
-                            IMAGE_ID_FIELD, "Instance ID", "Tool ID", "Tool Class",
-                            "Tool Name", "Confidence",
-                        } else ""
-                        for field in IMAGE_OBJECT_FIELDS
-                    }]
-                object_rows = _replace_scope(
-                    object_rows,
-                    replacements,
-                    scope={IMAGE_ID_FIELD: key},
-                )
-                write_image_manifests(
-                    manifest, rows, args.object_manifest, object_rows
-                )
-            review.append(key, decision, prompt=active_prompt)
-
-
-def populate_video_manifest(args: argparse.Namespace) -> Path:
-    existing = read_csv(args.manifest) if args.manifest.is_file() else []
-    by_path = {row["Filepath"]: row for row in existing if row.get("Filepath")}
-    for path in sorted(args.video_dir.glob("*.mp4")):
-        relative = path.relative_to(args.manifest.parent).as_posix()
-        if relative in by_path:
-            continue
-        capture = cv2.VideoCapture(str(path))
-        if not capture.isOpened():
-            raise RuntimeError(f"Could not inspect video {path}.")
-        try:
-            by_path[relative] = {
-                "Video ID": stable_media_id("video", relative),
-                "Filepath": relative,
-                "FPS": capture.get(cv2.CAP_PROP_FPS),
-                "Frame Count": int(capture.get(cv2.CAP_PROP_FRAME_COUNT)),
-                "Width": int(capture.get(cv2.CAP_PROP_FRAME_WIDTH)),
-                "Height": int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT)),
-                CAPTURE_SESSION_FIELD: args.capture_session_id,
-                "Condition": args.condition,
-            }
-        finally:
-            capture.release()
-    return write_csv(args.manifest, by_path.values(), VIDEO_MANIFEST_FIELDS)
-
-
-def _load_video_segment(
-    path: Path, start: int, stop: int | None
-) -> tuple[list[Image.Image], list[int]]:
-    capture = cv2.VideoCapture(str(path))
-    if not capture.isOpened():
-        raise FileNotFoundError(f"Could not open video {path}.")
-    capture.set(cv2.CAP_PROP_POS_FRAMES, start)
-    frames: list[Image.Image] = []
-    indices: list[int] = []
-    index = start
-    try:
-        while stop is None or index < stop:
-            ok, bgr = capture.read()
-            if not ok:
-                break
-            frames.append(Image.fromarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)))
-            indices.append(index)
-            index += 1
-    finally:
-        capture.release()
-    return frames, indices
-
-
-class Sam3VideoBackend:
-    def __init__(self, model_name: str, device: torch.device) -> None:
-        from transformers import Sam3VideoModel, Sam3VideoProcessor
-
-        self.model = Sam3VideoModel.from_pretrained(model_name).to(device).eval()
-        self.processor = Sam3VideoProcessor.from_pretrained(model_name)
-        self.device = device
-
-    @torch.inference_mode()
-    def predict(
-        self, frames: Sequence[Image.Image], prompt: str
-    ) -> dict[int, list[Candidate]]:
-        session = self.processor.init_video_session(
-            video=list(frames),
-            inference_device=self.device,
-            processing_device=self.device,
-            video_storage_device="cpu",
-        )
-        session = self.processor.add_text_prompt(inference_session=session, text=prompt)
-        results: dict[int, list[Candidate]] = {}
-        for output in self.model.propagate_in_video_iterator(
-            inference_session=session, show_progress_bar=True
-        ):
-            processed = self.processor.postprocess_outputs(session, output)
-            results[int(output.frame_idx)] = extract_candidates(
-                processed,
-                prompt=prompt,
-                identity_prefix="track",
-                keep_empty=True,
-            )
-        return results
-
-
-def annotate_videos(args: argparse.Namespace) -> None:
-    populate_video_manifest(args)
-    manifest_rows = read_csv(args.manifest)
-    object_rows: list[dict[str, object]] = (
-        list(read_csv(args.object_manifest)) if args.object_manifest.is_file() else []
-    )
-    review = ReviewLog(args.review_log)
-    device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
-    backend = Sam3VideoBackend(args.model, device)
-    aliases = load_taxonomy_aliases(args.aliases_json)
-    root = args.manifest.parent
-    for video in manifest_rows:
-        if args.video_id and video["Video ID"] != args.video_id:
-            continue
-        path = root / video["Filepath"]
-        frames, frame_indices = _load_video_segment(
-            path, args.start_frame, args.end_frame
-        )
-        if not frames:
-            raise ValueError(f"Selected video segment is empty: {path}")
-        active_prompt = normalize_tool_name(args.prompt, aliases)
-        outputs = backend.predict(frames, active_prompt)
-        for local_index, (frame, frame_index) in enumerate(
-            zip(frames, frame_indices, strict=True)
-        ):
-            key = f"{video['Video ID']}:{frame_index}"
-            if review.completed(key):
-                continue
-            candidates = deduplicate_candidates(outputs.get(local_index, []))
-            while True:
-                decision, selected, ignored, replacement, visibility = (
-                    review_candidates(
-                        frame,
-                        candidates,
-                        key=key,
-                        auto_accept=args.auto_accept,
-                        allow_occluded=True,
-                        review_log=review,
-                    )
-                )
-                if decision != "reprompt":
-                    break
-                assert replacement is not None
-                active_prompt = normalize_tool_name(replacement, aliases)
-                outputs = backend.predict(frames, active_prompt)
-                candidates = deduplicate_candidates(outputs.get(local_index, []))
-            if decision == "quit":
-                return
-            if decision == "skipped":
-                review.append(key, "skipped", prompt=active_prompt)
-                continue
-            if decision == "accepted":
-                mask_path = args.mask_dir / video["Video ID"] / f"{frame_index}.npz"
-                height, width = np.asarray(frame).shape[:2]
-                visible_candidates = [
-                    candidate
-                    for candidate in selected
-                    if candidate.visibility != "occluded" and candidate.mask.any()
+                normalized = [
+                    {
+                        **source,
+                        "Tool Name": normalize_tool_name(source["Tool Name"], aliases),
+                    }
+                    for source in instances
                 ]
+                if explicit or selected:
+                    replacements = resolved_image_rows(normalized, selected, mask_path)
+                else:
+                    # Preserve legacy accepted-empty semantics for single-tool captures.
+                    replacements = [
+                        {
+                            field: (
+                                source.get(field, "")
+                                if field
+                                in {
+                                    IMAGE_ID_FIELD,
+                                    "Instance ID",
+                                    "Tool ID",
+                                    "Tool Class",
+                                    "Tool Name",
+                                    "Confidence",
+                                }
+                                else ""
+                            )
+                            for field in IMAGE_OBJECT_FIELDS
+                        }
+                        for source in normalized
+                    ]
+                visible = [candidate for candidate in selected if candidate.mask.any()]
                 masks = (
-                    np.stack([candidate.mask for candidate in visible_candidates])
-                    if visible_candidates
-                    else np.zeros((0, height, width), dtype=np.bool_)
+                    np.stack([candidate.mask for candidate in visible])
+                    if visible
+                    else np.zeros((0, image.height, image.width), dtype=np.bool_)
                 )
                 save_mask_bundle(
                     mask_path,
                     masks,
-                    [candidate.identity for candidate in visible_candidates],
+                    [candidate.identity for candidate in visible],
                     ignore=(
                         np.logical_or.reduce([candidate.mask for candidate in ignored])
                         if ignored
                         else None
                     ),
                 )
-                bundle_indices = {
-                    candidate.identity: index
-                    for index, candidate in enumerate(visible_candidates)
-                }
-                replacements = []
-                for candidate in selected:
-                    box = mask2xywh(candidate.mask)
-                    if box is None and candidate.visibility != "occluded":
-                        continue
-                    if box is None:
-                        box = (0, 0, 0, 0)
-                    replacements.append(
-                        {
-                            "Video ID": video["Video ID"],
-                            "Frame Index": frame_index,
-                            "Track ID": candidate.identity,
-                            "Tool ID": args.tool_id if len(selected) == 1 else "",
-                            "Tool Class": args.tool_class,
-                            "Tool Name": candidate.prompt,
-                            "BBox X": box[0],
-                            "BBox Y": box[1],
-                            "BBox Width": box[2],
-                            "BBox Height": box[3],
-                            "Mask Path": str(mask_path),
-                            "Mask Index": bundle_indices.get(candidate.identity, -1),
-                            "Preferred Track": "FALSE",
-                            **_visibility_flags(candidate.visibility),
-                        }
-                    )
                 object_rows = _replace_scope(
-                    object_rows,
-                    replacements,
-                    scope={
-                        "Video ID": video["Video ID"],
-                        "Frame Index": frame_index,
-                    },
+                    object_rows, replacements, scope={IMAGE_ID_FIELD: key}
                 )
-                write_csv(args.object_manifest, object_rows, VIDEO_OBJECT_FIELDS)
-            review.append(key, decision, prompt=active_prompt)
+                write_image_manifests(manifest, rows, args.object_manifest, object_rows)
+            review.append(
+                key,
+                decision,
+                prompt=active_prompt,
+                instances=[
+                    {
+                        "instance_id": candidate.identity,
+                        "visibility": candidate.visibility,
+                    }
+                    for candidate in selected
+                ],
+            )
+        backend.refine_crop = original_refine
+
+
+def declare_instances(args: argparse.Namespace) -> None:
+    """Explicit intake for an image or an existing rotation sample."""
+    manifest = extend_image_manifest(args.manifest)
+    images = read_csv(manifest)
+    objects = read_csv(args.object_manifest) if args.object_manifest.is_file() else []
+    review = ReviewLog(args.review_log)
+    if args.sample_id is not None:
+        targets = [row for row in images if row.get("Sample ID") == args.sample_id]
+        if not targets:
+            raise ValueError(f"No images have Sample ID {args.sample_id}.")
+    else:
+        targets = []
+        by_path = {row["Filepath"]: row for row in images}
+        for filepath in dict.fromkeys(args.filepath):
+            image_mask_path(Path("masks/images"), filepath)
+            if (
+                not filepath.startswith("images/")
+                or not (manifest.parent / filepath).is_file()
+            ):
+                raise ValueError(
+                    f"Expected an existing image below images/: {filepath}"
+                )
+            if filepath not in by_path:
+                row = {
+                    "Filepath": filepath,
+                    IMAGE_ID_FIELD: stable_media_id("image", filepath),
+                }
+                images.append(row)
+                by_path[filepath] = row
+            targets.append(by_path[filepath])
+    additions = []
+    for image in targets:
+        key = image[IMAGE_ID_FIELD]
+        existing = [row for row in objects if row[IMAGE_ID_FIELD] == key]
+        if review.completed(key) or any(
+            row.get("Reviewed", "").upper() == "TRUE" for row in existing
+        ):
+            if not args.reopen:
+                raise ValueError(
+                    "Image already reviewed. Use --reopen to clear annotations and review again."
+                )
+        instance = {
+            IMAGE_ID_FIELD: key,
+            "Instance ID": args.instance_id
+            or stable_media_id("instance", f"{key}/{args.tool_id}"),
+            "Tool ID": args.tool_id,
+            "Tool Class": " ".join(args.tool_class.strip().split()),
+            "Tool Name": " ".join(args.tool_name.strip().split()),
+            "Confidence": str(args.confidence),
+        }
+        validate_instance_metadata([*existing, instance])
+        additions.append(instance)
+    target_ids = {row[IMAGE_ID_FIELD] for row in targets}
+    if args.reopen:
+        identity_fields = {
+            IMAGE_ID_FIELD,
+            "Instance ID",
+            "Tool ID",
+            "Tool Class",
+            "Tool Name",
+            "Confidence",
+        }
+        objects = [
+            (
+                {
+                    field: row.get(field, "") if field in identity_fields else ""
+                    for field in IMAGE_OBJECT_FIELDS
+                }
+                if row[IMAGE_ID_FIELD] in target_ids
+                else row
+            )
+            for row in objects
+        ]
+    write_image_manifests(
+        manifest, images, args.object_manifest, [*objects, *additions]
+    )
+    extend_image_manifest(manifest)
+    for instance in additions:
+        review.append(
+            instance[IMAGE_ID_FIELD], "pending", action="declare", instance=instance
+        )
+    print(f"Declared tool {args.tool_id} in {len(targets)} image(s).")
 
 
 def _shared(parser: argparse.ArgumentParser) -> None:
@@ -873,20 +829,45 @@ def parse_args() -> argparse.Namespace:
         description="Generate and review SAM3 annotations."
     )
     commands = parser.add_subparsers(dest="command", required=True)
+    declare = commands.add_parser(
+        "declare", help="Declare a physical tool in images or a rotation sample."
+    )
+    declare.add_argument("--manifest", type=Path, default=Path("image_manifest.csv"))
+    declare.add_argument(
+        "--object-manifest", type=Path, default=Path("image_object_manifest.csv")
+    )
+    declare.add_argument("--review-log", type=Path, default=Path("image_review.jsonl"))
+    target = declare.add_mutually_exclusive_group(required=True)
+    target.add_argument(
+        "--filepath",
+        action="append",
+        help="Image path; may be repeated. Adds new images to the manifest.",
+    )
+    target.add_argument(
+        "--sample-id", help="Declare the tool in every image of this existing sample."
+    )
+    declare.add_argument(
+        "--instance-id", help="Optional per-image instance identifier."
+    )
+    declare.add_argument("--tool-id", required=True)
+    declare.add_argument("--tool-class", required=True)
+    declare.add_argument("--tool-name", required=True)
+    declare.add_argument("--confidence", required=True, type=float)
+    declare.add_argument(
+        "--reopen",
+        action="store_true",
+        help="Clear previous annotations for targeted images and reopen review.",
+    )
     images = commands.add_parser("images")
     _shared(images)
-    images.add_argument(
-        "--manifest", type=Path, default=Path("image_manifest.csv")
-    )
+    images.add_argument("--manifest", type=Path, default=Path("image_manifest.csv"))
     images.add_argument(
         "--object-manifest",
         type=Path,
         default=Path("image_object_manifest.csv"),
     )
     images.add_argument("--mask-dir", type=Path, default=Path("masks/images"))
-    images.add_argument(
-        "--review-log", type=Path, default=Path("image_review.jsonl")
-    )
+    images.add_argument("--review-log", type=Path, default=Path("image_review.jsonl"))
     images.add_argument(
         "--skipped-first",
         action="store_true",
@@ -932,44 +913,33 @@ def parse_args() -> argparse.Namespace:
         help="Canonical tool-name prompt to add to multi-tool discovery.",
     )
 
-    videos = commands.add_parser("videos")
-    _shared(videos)
-    videos.add_argument(
-        "--manifest", type=Path, default=Path("video_manifest.csv")
-    )
-    videos.add_argument("--video-dir", type=Path, default=Path("videos"))
-    videos.add_argument(
-        "--object-manifest",
-        type=Path,
-        default=Path("video_object_manifest.csv"),
-    )
-    videos.add_argument("--mask-dir", type=Path, default=Path("masks/videos"))
-    videos.add_argument(
-        "--review-log", type=Path, default=Path("video_review.jsonl")
-    )
-    videos.add_argument("--video-id")
-    videos.add_argument("--start-frame", type=int, default=0)
-    videos.add_argument("--end-frame", type=int)
-    videos.add_argument("--prompt", required=True)
-    videos.add_argument("--tool-id", default="")
-    videos.add_argument("--tool-class", default="")
-    videos.add_argument("--capture-session-id", default="")
-    videos.add_argument("--condition", default="")
+    from video_annotation import add_video_commands
+
+    add_video_commands(commands)
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    if args.command == "images":
+    if args.command == "declare":
+        declare_instances(args)
+    elif args.command == "images":
         if args.batch_size <= 0:
             raise ValueError("batch-size must be positive.")
         annotate_images(args)
     else:
-        if args.start_frame < 0 or (
-            args.end_frame is not None and args.end_frame <= args.start_frame
-        ):
-            raise ValueError("Invalid video frame range.")
-        annotate_videos(args)
+        from video_annotation import annotate_videos, prepare_videos, verify_videos
+
+        if args.command == "prepare-videos":
+            prepare_videos(args)
+        elif args.command == "verify-videos":
+            verify_videos(args)
+        elif args.command == "export-video-training":
+            from video_export import export_video_training
+
+            export_video_training(args)
+        else:
+            annotate_videos(args)
 
 
 if __name__ == "__main__":

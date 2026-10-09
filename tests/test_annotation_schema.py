@@ -7,7 +7,7 @@ import pytest
 from annotate import (
     Candidate,
     ReviewLog,
-    _image_object_rows,
+    resolved_image_rows,
     image_prompt,
 )
 from annotations import canonical_tool_label, extend_image_manifest
@@ -68,16 +68,19 @@ def test_canonical_tool_label_combines_descriptor_and_class_once() -> None:
 
 def test_single_reprompt_candidate_keeps_manifest_identity(tmp_path: Path) -> None:
     mask = np.ones((4, 5), dtype=np.bool_)
-    rows = _image_object_rows(
-        {
-            "Image ID": "image-1",
-            "Tool ID": "tool-1",
-            "Tool Name": "iris",
-            "Tool Class": "scissors",
-        },
-        [Candidate(mask, 0.9, "shears", "instance-0")],
+    rows = resolved_image_rows(
+        [
+            {
+                "Image ID": "image-1",
+                "Instance ID": "declared-0",
+                "Confidence": "0.8",
+                "Tool ID": "tool-1",
+                "Tool Name": "iris",
+                "Tool Class": "scissors",
+            }
+        ],
+        [Candidate(mask, 0.9, "shears", "declared-0")],
         tmp_path / "mask.npz",
-        "shears",
     )
 
     assert rows[0]["Tool ID"] == "tool-1"
