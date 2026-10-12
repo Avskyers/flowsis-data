@@ -245,6 +245,32 @@ and the append-only `image_review.jsonl`. Commit these together with the updated
 bundles retain the format consumed by `flowsis` training. `--auto-accept` bypasses
 human review and should only be used when that is intended.
 
+### Visualize saved masks
+
+Export PNG previews without running SAM3 or opening a graphical window:
+
+```shell
+# Preview the first 32 saved image bundles.
+python visualize_masks.py
+# Preview every saved bundle for one tool.
+python visualize_masks.py masks/images/12 --count 0
+# Preview one image or extracted video frame.
+python visualize_masks.py masks/images/12/IMG_1001.npz
+python visualize_masks.py masks/videos --count 32
+# Specify the source explicitly for a bundle in a custom location.
+python visualize_masks.py /path/to/mask.npz --image /path/to/image.jpg
+```
+
+Previews are saved under `mask-review/`, preserving subdirectories of the input
+directory. Each PNG shows the original image, colored overlay, and mask-only
+view, with bundle indices and identities in the legend. Ignore regions appear
+as black/white stripes; overlapping instances blend their colors. Empty bundles
+show the unchanged image and a blank mask panel. Image dimensions must match
+the masks; the script reports failures and exits with a nonzero status.
+Use `--output-dir` to choose another destination, `--alpha` to adjust overlay
+opacity, and `--max-size` to adjust the displayed image resolution per panel.
+The script uses NumPy, Pillow, and Matplotlib from the existing environment.
+
 ### Multiple tools and overlapping tools
 
 Before mask annotation, prepare multi-tool captures in this order:
