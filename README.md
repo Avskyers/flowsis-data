@@ -24,23 +24,23 @@ We will use Git pushes and pulls to sychronize data. I recommend briefly researc
 Download your original images, unzip them if needed, and place them in
 `raw-images`. For single-tool captures, use the physical Tool ID as the folder
 name. For multiple tools, use the reserved `multi` folder with a subdirectory
-for each photographed arrangement:
+for each capture group with the same tools and overall setup:
 
 ```text
 raw-images/
   12/                         # Single-tool captures of physical tool 12
   13/                         # Single-tool captures of physical tool 13
   multi/
-    setup-001/                # One unchanged arrangement across rotations
+    setup-001/                # Same tools/setup, randomized positions and rotations
       IMG_1001.HEIC
       IMG_1002.HEIC
-    setup-002/                # A different arrangement
+    setup-002/                # Different tool set or overall capture conditions
       IMG_1010.HEIC
 ```
 
-Use unique setup folder names. Moving or flipping a tool, changing its opening,
-changing the lighting, or adding/removing tools starts a new setup. Rotating the
-unchanged arrangement stays in the same setup. Folder names organize captures;
+Use unique setup folder names. For multi-tool captures, moving or rotating the
+included tools stays in the same setup. Changing the tool set or overall capture
+conditions starts a new setup. Folder names organize captures;
 physical tool identities for multi-tool images belong in the object manifest.
 The converter preserves subdirectories, so
 `raw-images/multi/setup-001/IMG_1001.HEIC` becomes
@@ -111,15 +111,27 @@ fields in the **image manifest**, then run `python prepare_manifests.py` to refr
 copies. Do not edit internal Image ID or Instance ID values. Verification
 reports summaries or references that disagree between files.
 
-A **Tool ID** identifies one physical instrument. A **Sample ID** identifies
-one setup photographed across rotations. Flipping a tool, changing its opening,
-moving it to a new location, changing the lighting, or otherwise changing the
-setup starts a **new sample**. Rotating the unchanged setup stays in the same
-sample. For multiple tools, Angle describes rotation of the entire arrangement.
+A **Tool ID** identifies one physical instrument. A **Sample ID** identifies a
+related capture group with the same physical tools and overall setup. Sample IDs
+are globally unique across single-tool and multi-tool captures. A **Capture
+Session ID** identifies the broader photography session, which can contain
+several samples.
 
-Keep `Angle` in the image manifest. The eight views are 0, 45, 90, 135, 180,
-225, 270, and 315 degrees; 360 repeats 0. If filenames are out of order, correct
-the angles beside the corresponding filepaths. For example:
+For **single-tool samples**, keep the controlled rotation protocol: one unchanged
+setup, with eight views at 0, 45, 90, 135, 180, 225, 270, and 315 degrees. Flipping
+the tool, changing its opening or location, or changing the overall setup starts
+a new sample. Correct recorded angles if filenames are out of order.
+
+For **multi-tool samples**, keep the same Sample ID while randomizing the
+positions and rotations of the same tools within the same overall setup. Any
+number of images is valid. Start a new sample when the physical tool set or
+overall capture conditions change. Leave `Angle` **blank**, rather than entering
+`NA` or estimating each tool's orientation. If a shared arrangement rotation is
+actually known, an optional angle from 0 to less than 360 degrees is accepted;
+there is no rotation-coverage requirement. The sample type is determined from
+the declared tool set, so no new manifest columns are needed.
+
+Keep `Angle` in the manifest for controlled single-tool captures. For example:
 
 | Tool IDs | Sample ID | Angle | Filepath |
 | --- | --- | --- | --- |
@@ -127,12 +139,14 @@ the angles beside the corresponding filepaths. For example:
 | 0 | 15 | 45 | images/0/IMG_1003.jpg |
 | 0 | 15 | 90 | images/0/IMG_1001.jpg |
 
-Run `python prepare_manifests.py` after editing. It puts unfinished images (missing Sample ID or Angle)
-at the bottom, and sorts each section by numeric Tool IDs. Rows with the same
+Run `python prepare_manifests.py` after editing. It puts unfinished images
+(missing Sample ID, or missing Angle for a single-tool image) at the bottom,
+and sorts each section by numeric Tool IDs. Rows with the same
 tool IDs retain their existing order, regardless of sample, angle, or filename.
 Object rows follow the same image order. It preserves
 existing sample IDs and angles. Filename order only provides initial suggestions
-for new, unassigned batches; check that each batch really is one unchanged setup.
+for new, unassigned single-tool batches; check that each batch really is one
+unchanged setup.
 
 `prepare_manifests.py` creates a pending instance for each new single-tool image and reuses
 existing tool details from object rows. Annotation fields stay blank until review;
@@ -158,7 +172,7 @@ You can also run an automatic verification:
 python verify_data.py
 ```
 
-The verifier first checks the CSV and files for missing images, images that are not in the manifest, duplicate paths, tool IDs that disagree with their folder, invalid confidence values, incomplete samples, and missing or repeated angles. It then asks whether Codex should visually review temporary, downscaled contact sheets. The visual review looks for a different tool within a sample, suspicious rotation order, image-quality problems, and inconsistent class or name conventions. These findings are suggestions for a person to review; the verifier never changes the manifest. Temporary contact sheets are deleted automatically.
+The verifier first checks the CSV and files for missing images, images that are not in the manifest, duplicate paths, tool IDs that disagree with their folder, invalid confidence values, incomplete single-tool rotation samples, missing or repeated single-tool angles, and inconsistent tool sets within samples. Randomized multi-tool samples may have any image count and blank angles. It then asks whether Codex should visually review temporary, downscaled contact sheets. The visual review looks for a different tool set within a sample, suspicious single-tool rotation order, image-quality problems, and inconsistent class or name conventions. These findings are suggestions for a person to review; the verifier never changes the manifest. Temporary contact sheets are deleted automatically.
 
 The visual review requires the Codex command-line program and a one-time ChatGPT sign-in. If `codex` is not installed, install it with:
 
@@ -204,7 +218,7 @@ review SAM3 masks from the `flowsis-data` repository root:
 # Update an existing environment after pulling the annotation changes.
 conda env update -n flowsis-data -f environment.yml
 conda activate flowsis-data
-python annotate.py images --single-tool
+python annotate.py images
 ```
 
 The first run downloads `facebook/sam3` through Transformers. If access to the
@@ -213,8 +227,15 @@ account authorized to download it. Interactive review requires a graphical
 Matplotlib backend. CUDA is selected when available; use `--device cpu` to
 select CPU explicitly. `--batch-size 1` reduces the image batch size.
 
-`--single-tool` merges fragments such as the two sides of open scissors into
-one object. Omit it for multi-tool images. Prompts use `Tool Class` by default;
+Review mode is selected from each image's declared tools, so one command can
+review both single-tool and multi-tool images. Single-tool images use a simple
+mask review without Instance ID commands. Predicted masks are **not merged** by
+default: accept the one correct mask. If the model returns alternatives, choose
+one by its preview number; this still uses the single-tool interface.
+
+Optional `--merge-masks` (also accepted as `--single-tool`) merges predicted
+fragments into one mask during inference. It is only for captures known to need
+fragment union, and cannot be used with pending multi-tool images. Prompts use `Tool Class` by default;
 use `--image-prompt name-and-class` for prompts such as "iris scissors".
 A second pass refines a padded crop by default; disable it with
 `--no-refine-crop`.
@@ -222,10 +243,12 @@ A second pass refines a padded crop by default; disable it with
 
 In the terminal review prompt:
 
-- `a` accepts all candidates; `a 0,2` accepts selected candidates.
+- `a` accepts the mask when exactly one candidate is available.
+- `a 0` selects candidate 0 when several alternatives were predicted. Only one
+  candidate can be accepted; multiple selections do not implicitly merge masks.
 - `e` accepts an empty image; `r` rejects it; `s` skips it for later.
 - `p TEXT` reruns segmentation with another prompt.
-- `i 0,2` marks ignore regions; `v partial 0` sets an instance's visibility
+- `i 0,2` marks ignore regions; `v partial 0` sets the mask's visibility
   (`clear`, `partial`, or `severe`).
 - `q` quits. Rerunning the same command resumes unfinished images.
 
@@ -234,7 +257,7 @@ keeps its manifest order, and each image is shown at most once per run. To work
 through skipped images first, run:
 
 ```shell
-python annotate.py images --single-tool --skipped-first
+python annotate.py images --skipped-first
 ```
 
 Basic preparation assigns `Image ID` and `Capture Session ID`. Annotation reads
@@ -275,32 +298,35 @@ The script uses NumPy, Pillow, and Matplotlib from the existing environment.
 
 Before mask annotation, prepare multi-tool captures in this order:
 
-1. Place originals under `raw-images/multi/<setup>/`, keeping each unchanged
-   arrangement in its own setup folder.
+1. Place originals under `raw-images/multi/<setup>/`, grouping images with the
+   same tools and overall setup. Tool positions and rotations may vary freely.
 2. Run `python img_convert.py` and inspect any conversion failures.
-3. Declare every physical tool in each converted image. Repeat `--filepath`
-   to declare the same tool across several images of an arrangement:
+3. Declare the known physical tools for the entire arrangement in one command:
 
    ```shell
-   python annotate.py declare \
-     --filepath images/multi/setup-001/IMG_1001.jpg \
-     --filepath images/multi/setup-001/IMG_1002.jpg \
-     --tool-id 12 --tool-class scissors --tool-name iris --confidence 0.9
-   python annotate.py declare \
-     --filepath images/multi/setup-001/IMG_1001.jpg \
-     --filepath images/multi/setup-001/IMG_1002.jpg \
-     --tool-id 13 --tool-class forceps --tool-name fine --confidence 0.9
+   python annotate.py declare --folder setup-001 --tool-ids 12 13
    ```
 
-   Include all converted images of the arrangement, not just the two shown in
-   this example. `declare` adds image rows if necessary and records the actual
-   tool identities without inferring them from folder names.
+   `--folder setup-001` is shorthand for `--folder images/multi/setup-001`.
+   Every image in the folder and its subfolders receives both tool declarations.
+   Use a separate folder when the set of tools changes. Non-image files are
+   ignored, and missing or empty folders raise an exception. The command adds
+   image rows if necessary; it does not infer tool identities from folder names.
 
-4. In `image_manifest.csv`, assign one globally unique Sample ID to the unchanged
-   arrangement and enter each image's actual Angle. Use the eight views from 0
-   to 315 degrees for a complete rotation sample. A setup folder name does not
-   automatically assign a Sample ID. Review each tool's ID, class, name, and
-   identification confidence in `image_object_manifest.csv`.
+   Each Tool ID must already exist in `image_object_manifest.csv`, typically
+   from single-tool preparation. Class, name, and identification confidence are
+   copied from those records. Missing IDs, missing/conflicting class or name,
+   and invalid confidences raise an exception before declarations are written.
+   If confidence differs between existing records, the lowest value is used.
+   Identify new tools in the manifest before declaring them in multi-tool images;
+   the declaration command no longer accepts metadata overrides.
+
+4. In `image_manifest.csv`, assign one globally unique Sample ID to the images
+   with the same physical tools and overall setup, even when tool positions and
+   rotations vary. Leave `Angle` blank for these randomized captures; any image
+   count is valid. A setup folder name does not automatically assign a Sample ID.
+   Review each tool's ID, class, name, and identification confidence in
+   `image_object_manifest.csv`.
 5. Run `python prepare_manifests.py` to fill available camera metadata and
    refresh navigation columns. It preserves your manual sample and angle values.
 6. Run `python verify_data.py --static-only` and resolve manifest errors before
@@ -312,43 +338,129 @@ and lists the multi-tool images that still need declaration. It does not infer
 how many tools are present: reviewers must declare **every** physical tool, even
 if an image already has one instance row.
 
-Instead of repeated filepaths, use `--sample-id 15` to declare a tool in every
-image of an existing, manually assigned rotation sample. Instance IDs are
-generated from the image and physical tool ID; `--instance-id` allows an explicit
-identifier. Duplicate instance or physical tool IDs within an image are rejected.
+For individual images, use `--filepath images/multi/setup-001/IMG_1001.jpg`
+(repeat `--filepath` for several images). Alternatively, `--sample-id 15` targets
+every image of an existing, manually assigned sample, including a randomized
+multi-tool sample. All target modes accept `--tool-ids 12 13` or repeated `--tool-id 12 --tool-id 13`.
+Instance IDs are generated from the image and physical tool ID; `--instance-id`
+allows an explicit identifier when declaring exactly one tool. Duplicate instance
+or physical tool IDs within an image are rejected.
 `declare` does not infer a rotation sequence or camera metadata.
 To add a tool to an already reviewed image, `declare --reopen` clears all its
 annotation fields and reopens it for review, while keeping existing identities.
 
-Run multi-tool annotation **without** `--single-tool` or `--auto-accept`.
+To review only multi-tool images, skipping single-tool captures:
+
+```shell
+python annotate.py images --multi-tool
+```
+
+This selects images with multiple declared tools in `image_object_manifest.csv`,
+regardless of their folder or manifest position. Existing review decisions still
+apply; add `--skipped-first` to prioritize previously skipped multi-tool images.
+Without this flag, both kinds of images are reviewed in manifest order.
+
+Run multi-tool annotation **without** `--merge-masks`/`--single-tool` or `--auto-accept`.
 The model runs each unique declared label once per image, so two scissors share
 a prompt but still require separate identity assignments. Optional
 `--discovery-prompt` and `--canonical-prompt` add predictions. All candidates are
 retained for explicit review, including possible duplicates and overlapping
 masks. Automatic crop refinement is disabled for batches containing multi-tool
-images and for additional prompts entered during explicit review. Per-instance
-refinement after assignment is deferred.
+images and for additional prompts entered during explicit review. After assigning
+masks, use the explicit per-tool crop refinement described below.
 
 The interface uses a Matplotlib image preview and terminal commands. The preview
 shows colored, numbered masks, bounding boxes, prompts, model scores, and current
-assignments. The terminal lists declared Instance IDs, Tool IDs, classes, names,
+assignments. The terminal lists declared Tool IDs, classes, names,
 identification confidence, visibility, and assigned candidate indices. Prompts
 and scores are suggestions; the reviewer supplies the physical identity.
 
-The explicit reviewer is used by default. `--single-tool` retains the original
-single-tool review commands when there is one declared tool and one candidate;
-ambiguous results switch to explicit assignment. Its fragment union is only
-appropriate for captures known to contain one tool.
+The explicit assignment interface below is used **only for multi-tool images**.
+Single-tool images always use the simpler reviewer described above, including
+when the model predicts several alternative masks or returns no predictions.
+
+Use physical **Tool IDs** in commands; each can occur only once in an image.
+For example, if mask candidate 0 covers tool 0 (scissors) and candidate 1 covers
+tool 3 (rongeur):
+
+```text
+review> g 0 0
+review> g 3 1
+review> a
+```
+
+The first number after `g` is the Tool ID; the second is the mask candidate
+number shown in the preview. The prompt on a candidate is a segmentation hint,
+not its final tool identity. Assigned candidates are labeled `tool 0`, `tool 3`,
+etc. Instance IDs remain internal CSV/mask references; legacy commands using
+full Instance IDs still work when they do not match a Tool ID. A matching Tool
+ID takes precedence. `n` generates its internal Instance ID automatically.
+
+In the multi-tool reviewer, `masks []` means **no candidates are assigned** to
+that tool; it does not tell you whether the model found any masks. The terminal
+lists the candidate count and numbered predictions separately. Inspect the
+Matplotlib preview, then assign candidate numbers to each declared Tool ID
+before accepting. Use `g TOOL_ID 0,2` when candidates 0 and 2 are disconnected
+pieces of that tool. Resolve other candidates by assigning them to another tool,
+excluding false predictions with `x`, or marking ignore regions with `i`.
+If there are **no candidates**, try `p TEXT` with a suitable tool description,
+inspect the new predictions, and assign them. Use `s` to defer an image if
+prediction still fails. `a` alone does not assign masks in multi-tool review.
+
+The multi-tool preview combines a full-image overview with one zoomed panel
+per declared tool. Candidate numbers remain visible in the overview. Assigned
+tools use consistent colors in the overview and their crop panels; original
+image context remains visible around each tool, including overlapping tools.
+Panels without an assigned visible mask show a placeholder.
+
+After assigning the masks, refine tools individually or together:
+
+```text
+review> g 0 0
+review> g 3 1
+review> refine all
+review> restore 3
+review> refine 3 rongeur
+review> a
+```
+
+`refine TOOL_ID` uses that tool's name and class as the prompt; optional text
+overrides it for that attempt. The command reruns segmentation on a padded crop
+of the original pixels and maps the result back into full-image coordinates.
+It selects a prediction by agreement with the assigned mask, rather than by
+model score alone. Low agreement or similarly matching alternatives leave the
+previous mask intact. These checks are conservative heuristics; inspect every
+refinement, especially when tools overlap. They do not subtract another tool's
+mask or guarantee correct identity.
+
+Results touching an interior crop edge retry with more padding, up to three
+crop sizes. A boundary at the edge of the actual image is allowed. Refinement
+never merges crop predictions automatically. In each tool panel, the colored
+mask is the current result and a dashed gold outline shows the original assigned
+mask after a refinement. `restore TOOL_ID` returns to that original assignment;
+`restore all` restores all tools. You can retry refinement or accept the current
+results with `a`. Refining one tool does not change another tool's assignment.
+Assigning different candidates with `g`, clearing with `u`, or marking a tool
+absent/occluded discards its refinement.
+
+Crop refinement is optional and runs only on request in multi-tool review,
+including when `--no-refine-crop` disables the automatic single-tool pass.
+Refinement decisions are logged; unaccepted refinement masks are held for the
+current reviewer session. Accept to save them before quitting. No new manifest
+columns or cropped training images are required: final masks retain the original
+image dimensions and stable Instance IDs.
 
 | Command | Action |
 | --- | --- |
-| `g INSTANCE_ID 0,2` | Assign or combine candidates 0 and 2 into this tool's mask; replaces its previous assignment. |
-| `u INSTANCE_ID` | Clear an assignment and its visibility state. |
-| `v INSTANCE_ID partial` | Set `clear`, `partial`, `severe`, `occluded`, or `absent`. Occluded means fully hidden; absent means not in the image. |
+| `g TOOL_ID 0,2` | Assign or combine candidates 0 and 2 into this tool's mask; replaces its previous assignment. |
+| `u TOOL_ID` | Clear an assignment, its refinement, and its visibility state. |
+| `refine TOOL_ID [TEXT]` / `refine all` | Refine assigned tools using crops of the original image; inspect the updated panels. |
+| `restore TOOL_ID` / `restore all` | Discard refinements and restore the original assigned masks. |
+| `v TOOL_ID partial` | Set `clear`, `partial`, `severe`, `occluded`, or `absent`. Occluded means fully hidden; absent means not in the image. |
 | `x 1,3` | Exclude false or duplicate candidates. |
 | `i 1,3` | Add candidates to the shared ignore region. |
 | `p forceps` | Append predictions using another prompt while preserving existing assignments. |
-| `n INSTANCE_ID TOOL_ID "CLASS" "NAME" CONFIDENCE` | Declare an unexpected tool with complete metadata. Quote multiword class/name values. |
+| `n TOOL_ID "CLASS" "NAME" CONFIDENCE` | Declare an unexpected tool with complete metadata. Quote multiword class/name values. |
 | `a` | Accept after every tool and candidate is resolved. |
 | `e` | Accept an empty image: explicitly mark all declared tools absent and exclude remaining candidates. |
 | `s`, `r`, `q` | Skip, reject, or quit. |

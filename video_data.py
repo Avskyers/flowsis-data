@@ -21,6 +21,7 @@ from annotations import (
     parse_bool,
     read_csv,
     stable_media_id,
+    tool_metadata,
     write_csv,
 )
 from masks import load_mask_bundle, mask2xywh, save_mask_bundle
@@ -60,36 +61,6 @@ class VideoLog:
                 json.dumps({"key": key, "decision": decision, **details}) + "\n"
             )
         self.decisions[key] = decision
-
-
-def tool_metadata(path: Path, tool_id: str) -> dict[str, str]:
-    matches = [row for row in read_csv(path) if row.get("Tool ID") == tool_id]
-    if not matches:
-        raise ValueError(
-            f"Unknown Tool ID {tool_id}: identify it in the image object manifest first."
-        )
-    identities = {
-        (row["Tool Class"].strip(), row["Tool Name"].strip()) for row in matches
-    }
-    if len(identities) != 1 or any(not value for value in next(iter(identities))):
-        raise ValueError(
-            f"Tool {tool_id} has missing or conflicting image identification metadata."
-        )
-    try:
-        confidence = min(float(row["Confidence"]) for row in matches)
-        if any(not 0 <= float(row["Confidence"]) <= 1 for row in matches):
-            raise ValueError
-    except ValueError as error:
-        raise ValueError(
-            f"Tool {tool_id} has invalid identification confidence."
-        ) from error
-    tool_class, name = next(iter(identities))
-    return {
-        "Tool ID": tool_id,
-        "Tool Class": tool_class,
-        "Tool Name": name,
-        "Confidence": str(confidence),
-    }
 
 
 def prepare_videos(args: argparse.Namespace) -> None:

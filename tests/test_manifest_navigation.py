@@ -76,3 +76,38 @@ def test_unfinished_images_go_last_with_stable_tool_order(tmp_path):
     assert [row["Image ID"] for row in read_csv(manifest)] == [
         "c", "d", "b", "a", "f", "g", "e",
     ]
+
+
+def test_randomized_multi_tool_sample_is_finished_without_angle(tmp_path):
+    images = [
+        {
+            "Image ID": "single-unfinished",
+            "Sample ID": "1",
+            "Angle": "",
+            "Filepath": "images/single.jpg",
+        },
+        {
+            "Image ID": "multi-finished",
+            "Sample ID": "2",
+            "Angle": "",
+            "Filepath": "images/multi/setup/a.jpg",
+        },
+        {
+            "Image ID": "multi-unfinished",
+            "Sample ID": "",
+            "Angle": "",
+            "Filepath": "images/multi/setup/b.jpg",
+        },
+    ]
+    objects = [
+        {"Image ID": image["Image ID"], "Instance ID": tool, "Tool ID": tool}
+        for image in images
+        for tool in (["2"] if image["Image ID"] == "single-unfinished" else ["2", "12"])
+    ]
+    manifest, object_manifest = tmp_path / "images.csv", tmp_path / "objects.csv"
+    write_image_manifests(manifest, images, object_manifest, objects)
+    assert [row["Image ID"] for row in read_csv(manifest)] == [
+        "multi-finished",
+        "single-unfinished",
+        "multi-unfinished",
+    ]

@@ -348,10 +348,10 @@ def main(
         for filepath in sorted(undeclared_multi):
             print(f"- {filepath}")
         print(
-            "Run python annotate.py declare --filepath IMAGE --tool-id ID "
-            '--tool-class "CLASS" --tool-name "NAME" --confidence 0.9 '
-            "for each physical tool in each image. Repeat --filepath for several images. "
-            "Then assign Sample ID and Angle in image_manifest.csv and rerun prepare_manifests.py."
+            "Run python annotate.py declare --folder SETUP --tool-ids ID [ID ...] "
+            "using tools already identified in image_object_manifest.csv. "
+            "Then assign Sample ID in image_manifest.csv, leave randomized multi-tool "
+            "Angle blank, and rerun prepare_manifests.py."
         )
 
     normalized_labels = 0

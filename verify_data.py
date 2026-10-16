@@ -12,6 +12,7 @@ from pathlib import Path, PurePosixPath
 
 from annotations import (
     numeric_sort_key,
+    is_multi_tool_image,
     tool_id_summary,
     parse_bool,
     validate_instance_metadata,
@@ -316,13 +317,14 @@ def validate_manifest(
 
         sample_id = row["Sample ID"].strip()
         angle = row["Angle"].strip()
-        if bool(sample_id) != bool(angle):
+        multi_tool = len({obj["Tool ID"] for obj in by_image[row["Image ID"]]}) > 1
+        if (angle and not sample_id) or (sample_id and not angle and not multi_tool):
             issues.append(
                 issue(
                     "error",
                     "partial_sample_assignment",
                     location,
-                    "Sample ID and Angle must either both be filled or both be blank.",
+                    "Single-tool images require Sample ID and Angle together; multi-tool images may leave Angle blank.",
                 )
             )
         if sample_id:
@@ -333,7 +335,7 @@ def validate_manifest(
                     "warning",
                     "ungrouped_image",
                     filepath or location,
-                    "The image has no sample ID or angle and cannot be visually checked by sample.",
+                    "The image has no Sample ID and cannot be visually checked by sample.",
                 )
             )
 
@@ -356,7 +358,11 @@ def validate_manifest(
 
     for sample_id, sample_rows in samples.items():
         location = f"Sample {sample_id}"
-        if len(sample_rows) != 8:
+        multi_tool = all(
+            len({obj["Tool ID"] for obj in by_image[row["Image ID"]]}) > 1
+            for row in sample_rows
+        )
+        if not multi_tool and len(sample_rows) != 8:
             issues.append(
                 issue(
                     "error",
@@ -366,7 +372,10 @@ def validate_manifest(
                 )
             )
         for column in ("Tool ID", "Tool Class", "Tool Name"):
-            values = {row[column].strip() for row in sample_rows}
+            values = {
+                "; ".join(sorted(obj[column].strip() for obj in by_image[row["Image ID"]]))
+                for row in sample_rows
+            }
             if len(values) != 1:
                 issues.append(
                     issue(
@@ -376,6 +385,24 @@ def validate_manifest(
                         f"{column} has multiple values: {', '.join(sorted(values))}.",
                     )
                 )
+        if multi_tool:
+            for row in sample_rows:
+                if not row["Angle"].strip():
+                    continue
+                try:
+                    valid = 0 <= float(row["Angle"]) < 360
+                except ValueError:
+                    valid = False
+                if not valid:
+                    issues.append(
+                        issue(
+                            "error",
+                            "invalid_angles",
+                            row["Filepath"],
+                            "Multi-tool Angle must be blank or a known rotation from 0 to less than 360 degrees.",
+                        )
+                    )
+            continue
         angles: list[int] = []
         invalid_angles: list[str] = []
         for row in sample_rows:
@@ -383,7 +410,11 @@ def validate_manifest(
                 angles.append(int(row["Angle"].strip()))
             except ValueError:
                 invalid_angles.append(row["Angle"])
-        if invalid_angles or set(angles) != EXPECTED_ANGLES or len(angles) != len(set(angles)):
+        if (
+            invalid_angles
+            or set(angles) != EXPECTED_ANGLES
+            or len(angles) != len(set(angles))
+        ):
             shown = ", ".join(row["Angle"] or "blank" for row in sample_rows)
             issues.append(
                 issue(
@@ -463,7 +494,12 @@ def make_contact_sheet(sample_id: str, rows: list[dict[str, str]], destination: 
             y_base = header_height + (index // columns) * (image_height + label_height)
             y = y_base + (image_height - image.height) // 2
             sheet.paste(image, (x, y))
-        label = f"{Path(row['Filepath']).name} | {row['Angle'] or '?'} degrees"
+        angle_label = (
+            f"{row['Angle']} degrees"
+            if row["Angle"].strip()
+            else "randomized" if is_multi_tool_image(row) else "unknown angle"
+        )
+        label = f"{Path(row['Filepath']).name} | {angle_label}"
         draw.text(
             ((index % columns) * tile_width + 8, y_base + image_height + 7),
             label,
@@ -492,6 +528,11 @@ def agent_prompt(
             "tool_id": sample_rows[0]["Tool ID"],
             "tool_class": sample_rows[0]["Tool Class"],
             "tool_name": sample_rows[0]["Tool Name"],
+            "capture_type": (
+                "randomized_multi_tool"
+                if is_multi_tool_image(sample_rows[0])
+                else "single_tool_rotation"
+            ),
             "images": [
                 {"filepath": row["Filepath"], "recorded_angle": row["Angle"]}
                 for row in sample_rows
@@ -509,12 +550,16 @@ def agent_prompt(
     )
     return f"""You are reviewing an image dataset of tools. Each attached contact sheet is one
 sample and its tiles are labeled with filepath and recorded angle. For each sample, check that:
-1. Every tile shows the same physical tool; flag a tile if another meaningful property differs.
-2. The tool appears to rotate in approximately 45-degree steps in the recorded order.
-3. The visible object plausibly agrees with the recorded tool class and name.
-4. Image quality is sufficient to identify and compare the tool.
+1. Every tile shows the same physical tool or set of tools for the sample.
+2. For single_tool_rotation samples only, the tool rotates in approximately 45-degree steps
+   in the recorded order. These samples should have eight recorded angles.
+3. For randomized_multi_tool samples, positions and orientations of the included tools may
+   change freely. Blank angles and any image count are expected. Do not flag missing angles,
+   rotation order, or rearrangements; flag an apparent change in the physical tool set.
+4. The visible tools plausibly agree with the recorded classes and names.
+5. Image quality is sufficient to identify and compare the tools.
 
-Interpret angles as clockwise rotations from image north (the top edge): north is 0 degrees,
+For recorded single-tool angles, interpret angles as clockwise rotations from image north (the top edge): north is 0 degrees,
 east is 90 degrees, south is 180 degrees, and west is 270 degrees. Use the tool's directed
 centerline from its handle or base toward its working end or tip. For an opened symmetric tool,
 such as a pair of scissors, use its axis of symmetry: the bisector between the working ends,

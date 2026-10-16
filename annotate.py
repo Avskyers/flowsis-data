@@ -23,12 +23,15 @@ from annotations import (
     normalize_tool_name,
     read_csv,
     stable_media_id,
+    tool_metadata,
     write_csv,
     write_image_manifests,
     validate_instance_metadata,
 )
 from masks import mask2xywh, save_mask_bundle
 from image_review import Candidate, review_image_instances
+from image_refinement import refine_tool
+from image_ui import show_tool_review
 
 
 class ReviewLog:
@@ -212,14 +215,28 @@ def review_candidates(
     import matplotlib.pyplot as plt
 
     if auto_accept:
+        if len(candidates) > 1:
+            raise ValueError(
+                "Multiple masks predicted for a single-tool image. "
+                "Disable --auto-accept and choose one mask, or explicitly enable --merge-masks."
+            )
         return "accepted", list(candidates), [], None, "clear"
     visibility = "clear"
     visibility_by_index = {index: "clear" for index in range(len(candidates))}
     ignored_indices: set[int] = set()
     while True:
         show_candidates(image, candidates, key, focus=True)
+        print(f"Single-tool review: {len(candidates)} mask candidate(s).")
+        if not candidates:
+            print(
+                "No masks predicted. Use 'p TEXT' to try another prompt, or 's' to skip."
+            )
+        elif len(candidates) > 1:
+            print(
+                "Multiple masks predicted. Inspect the numbered preview and choose one with 'a INDEX'."
+            )
         print(
-            "a [0,2]=accept, e=accept empty, r=reject, s=skip, "
+            "a [INDEX]=accept one mask, e=accept empty, r=reject, s=skip, "
             "p TEXT=re-prompt, i [0,2]=mark ignore regions, "
             "v STATE [0,2]=set visibility, "
             + ("o [0,2]=retain occluded tracks, " if allow_occluded else "")
@@ -230,7 +247,22 @@ def review_candidates(
         command, _, argument = response.partition(" ")
         try:
             if command == "a":
-                accepted_indices = set(_parse_indices(argument, len(candidates)))
+                if not argument.strip() and len(candidates) > 1:
+                    raise ValueError(
+                        "Choose one mask with 'a INDEX'; masks are not merged by default."
+                    )
+                accepted_indices = (
+                    set(_parse_indices(argument, len(candidates))) - ignored_indices
+                )
+                if len(accepted_indices) != 1:
+                    raise ValueError(
+                        "Accept exactly one mask. Use 'p TEXT' to try another prompt, "
+                        "'s' to skip, or 'e' only for an empty image."
+                    )
+                if not candidates[next(iter(accepted_indices))].mask.any():
+                    raise ValueError(
+                        "The selected mask is empty. Try another prompt or skip this image."
+                    )
                 return (
                     "accepted",
                     [
@@ -238,7 +270,7 @@ def review_candidates(
                             candidates[index],
                             visibility=visibility_by_index[index],
                         )
-                        for index in sorted(accepted_indices - ignored_indices)
+                        for index in sorted(accepted_indices)
                     ],
                     [candidates[index] for index in sorted(ignored_indices)],
                     None,
@@ -518,8 +550,13 @@ def annotate_images(args: argparse.Namespace) -> None:
         sources.setdefault(str(obj[IMAGE_ID_FIELD]), []).append(
             {field: str(value) for field, value in obj.items()}
         )
+    targets = [
+        row
+        for row in rows
+        if not args.multi_tool or len(sources.get(row[IMAGE_ID_FIELD], [])) > 1
+    ]
     review = ReviewLog(args.review_log)
-    for row in rows:
+    for row in targets:
         if review.completed(row[IMAGE_ID_FIELD]):
             continue
         instances = sources.get(row[IMAGE_ID_FIELD], [])
@@ -536,6 +573,31 @@ def annotate_images(args: argparse.Namespace) -> None:
             raise ValueError(
                 "Multi-tool images require explicit review; --auto-accept cannot assign identities."
             )
+    root = manifest.parent
+    aliases = load_taxonomy_aliases(args.aliases_json)
+    missing = [
+        row["Filepath"] for row in targets if not (root / row["Filepath"]).is_file()
+    ]
+    if missing:
+        print(
+            f"Skipping {len(missing)} manifest images that are not present below {root}."
+        )
+    queue = [
+        row
+        for row in targets
+        if not review.completed(row[IMAGE_ID_FIELD])
+        and (root / row["Filepath"]).is_file()
+    ]
+    queue.sort(
+        key=lambda row: (
+            review.decisions.get(row[IMAGE_ID_FIELD], {}).get("decision") == "skipped"
+        )
+        != args.skipped_first
+    )
+    if not queue:
+        kind = "multi-tool " if args.multi_tool else ""
+        print(f"No unfinished {kind}images available for review.")
+        return
     device = torch.device(
         args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     )
@@ -545,27 +607,6 @@ def annotate_images(args: argparse.Namespace) -> None:
         args.threshold,
         refine_crop=args.refine_crop,
         single_tool=args.single_tool,
-    )
-    root = manifest.parent
-    aliases = load_taxonomy_aliases(args.aliases_json)
-    missing = [
-        row["Filepath"] for row in rows if not (root / row["Filepath"]).is_file()
-    ]
-    if missing:
-        print(
-            f"Skipping {len(missing)} manifest images that are not present below {root}."
-        )
-    queue = [
-        row
-        for row in rows
-        if not review.completed(row[IMAGE_ID_FIELD])
-        and (root / row["Filepath"]).is_file()
-    ]
-    queue.sort(
-        key=lambda row: (
-            review.decisions.get(row[IMAGE_ID_FIELD], {}).get("decision") == "skipped"
-        )
-        != args.skipped_first
     )
     for offset in range(0, len(queue), args.batch_size):
         pending = queue[offset : offset + args.batch_size]
@@ -608,12 +649,15 @@ def annotate_images(args: argparse.Namespace) -> None:
                 replace(candidate, identity=f"candidate-{index}")
                 for index, candidate in enumerate(initial)
             ]
-            explicit = (
-                len(instances) > 1
-                or len(candidates) > 1
-                or len(prompts) > 1
-                or (not args.single_tool and not args.auto_accept)
+            explicit = len(instances) > 1
+            print(
+                f"\nReviewing {row['Filepath']} ({key}); prompts: {', '.join(prompts)}"
             )
+            if not explicit:
+                tool = instances[0]
+                print(
+                    f"Tool {tool['Tool ID']} | {tool['Tool Class']} | {tool['Tool Name']}"
+                )
             while not explicit:
                 decision, selected, ignored, replacement_prompt, _ = review_candidates(
                     image,
@@ -627,7 +671,6 @@ def annotate_images(args: argparse.Namespace) -> None:
                 assert replacement_prompt is not None
                 active_prompt = normalize_tool_name(replacement_prompt, aliases)
                 candidates = backend.predict([image], [active_prompt])[0]
-                explicit = len(candidates) > 1
             if explicit:
                 if args.auto_accept:
                     raise ValueError(
@@ -650,6 +693,13 @@ def annotate_images(args: argparse.Namespace) -> None:
                     instances,
                     key=key,
                     show=show_candidates,
+                    show_tools=show_tool_review,
+                    refine=lambda seed, prompt: refine_tool(
+                        image,
+                        seed,
+                        normalize_tool_name(prompt, aliases),
+                        lambda crop, text: backend.predict([crop], [text])[0],
+                    ),
                     predict=lambda prompt: backend.predict(
                         [image], [normalize_tool_name(prompt, aliases)]
                     )[0],
@@ -734,7 +784,11 @@ def annotate_images(args: argparse.Namespace) -> None:
 
 
 def declare_instances(args: argparse.Namespace) -> None:
-    """Explicit intake for an image or an existing rotation sample."""
+    """Declare known physical tools across images, a setup folder, or a sample."""
+    tool_ids = list(dict.fromkeys(args.tool_id))
+    metadata = [tool_metadata(args.object_manifest, tool_id) for tool_id in tool_ids]
+    if args.instance_id and len(tool_ids) != 1:
+        raise ValueError("--instance-id requires exactly one Tool ID.")
     manifest = extend_image_manifest(args.manifest)
     images = read_csv(manifest)
     objects = read_csv(args.object_manifest) if args.object_manifest.is_file() else []
@@ -746,7 +800,44 @@ def declare_instances(args: argparse.Namespace) -> None:
     else:
         targets = []
         by_path = {row["Filepath"]: row for row in images}
-        for filepath in dict.fromkeys(args.filepath):
+        filepaths = args.filepath or []
+        if args.folder is not None:
+            folder = Path(args.folder)
+            multi = (manifest.parent / "images/multi").resolve()
+            if folder.is_absolute() or ".." in folder.parts:
+                raise ValueError(
+                    "Folder must be an ID or relative path under images/multi/."
+                )
+            if folder.parts[:2] == ("images", "multi"):
+                folder = manifest.parent / folder
+            else:
+                folder = multi / folder
+            if not folder.resolve().is_relative_to(multi) or not folder.is_dir():
+                raise ValueError(
+                    f"Expected an existing folder under images/multi/: {args.folder}"
+                )
+            filepaths = [
+                path.relative_to(manifest.parent.resolve()).as_posix()
+                for path in sorted(folder.resolve().rglob("*"))
+                if path.is_file()
+                and path.suffix.lower()
+                in {
+                    ".avif",
+                    ".heic",
+                    ".heif",
+                    ".jpg",
+                    ".jpeg",
+                    ".png",
+                    ".tif",
+                    ".tiff",
+                    ".bmp",
+                    ".webp",
+                }
+                and path.resolve().is_relative_to(multi)
+            ]
+            if not filepaths:
+                raise ValueError(f"No images found in folder: {args.folder}")
+        for filepath in dict.fromkeys(filepaths):
             image_mask_path(Path("masks/images"), filepath)
             if (
                 not filepath.startswith("images/")
@@ -774,17 +865,16 @@ def declare_instances(args: argparse.Namespace) -> None:
                 raise ValueError(
                     "Image already reviewed. Use --reopen to clear annotations and review again."
                 )
-        instance = {
-            IMAGE_ID_FIELD: key,
-            "Instance ID": args.instance_id
-            or stable_media_id("instance", f"{key}/{args.tool_id}"),
-            "Tool ID": args.tool_id,
-            "Tool Class": " ".join(args.tool_class.strip().split()),
-            "Tool Name": " ".join(args.tool_name.strip().split()),
-            "Confidence": str(args.confidence),
-        }
-        validate_instance_metadata([*existing, instance])
-        additions.append(instance)
+        for tool in metadata:
+            instance = {
+                IMAGE_ID_FIELD: key,
+                "Instance ID": args.instance_id
+                or stable_media_id("instance", f"{key}/{tool['Tool ID']}"),
+                **tool,
+            }
+            validate_instance_metadata([*existing, instance])
+            existing.append(instance)
+            additions.append(instance)
     target_ids = {row[IMAGE_ID_FIELD] for row in targets}
     if args.reopen:
         identity_fields = {
@@ -814,7 +904,7 @@ def declare_instances(args: argparse.Namespace) -> None:
         review.append(
             instance[IMAGE_ID_FIELD], "pending", action="declare", instance=instance
         )
-    print(f"Declared tool {args.tool_id} in {len(targets)} image(s).")
+    print(f"Declared tools {', '.join(tool_ids)} in {len(targets)} image(s).")
 
 
 def _shared(parser: argparse.ArgumentParser) -> None:
@@ -830,7 +920,8 @@ def parse_args() -> argparse.Namespace:
     )
     commands = parser.add_subparsers(dest="command", required=True)
     declare = commands.add_parser(
-        "declare", help="Declare a physical tool in images or a rotation sample."
+        "declare",
+        help="Declare known tools in images, a multi-tool folder, or a sample.",
     )
     declare.add_argument("--manifest", type=Path, default=Path("image_manifest.csv"))
     declare.add_argument(
@@ -844,15 +935,23 @@ def parse_args() -> argparse.Namespace:
         help="Image path; may be repeated. Adds new images to the manifest.",
     )
     target.add_argument(
+        "--folder",
+        help="Setup folder ID or path under images/multi/; includes all nested images.",
+    )
+    target.add_argument(
         "--sample-id", help="Declare the tool in every image of this existing sample."
     )
     declare.add_argument(
         "--instance-id", help="Optional per-image instance identifier."
     )
-    declare.add_argument("--tool-id", required=True)
-    declare.add_argument("--tool-class", required=True)
-    declare.add_argument("--tool-name", required=True)
-    declare.add_argument("--confidence", required=True, type=float)
+    declare.add_argument(
+        "--tool-id",
+        "--tool-ids",
+        required=True,
+        nargs="+",
+        action="extend",
+        help="Known physical Tool IDs; metadata is read from the object manifest.",
+    )
     declare.add_argument(
         "--reopen",
         action="store_true",
@@ -873,14 +972,22 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Review previously skipped images first (default: skipped images last).",
     )
+    images.add_argument(
+        "--multi-tool",
+        action="store_true",
+        help="Review only images with multiple declared tools; skip single-tool images.",
+    )
     images.add_argument("--batch-size", type=int, default=4)
     images.add_argument("--threshold", type=float, default=0.5)
     images.add_argument(
+        "--merge-masks",
         "--single-tool",
+        dest="single_tool",
         action="store_true",
         help=(
-            "For images containing one tool, merge masks from each prompt into "
-            "one object in both inference passes (useful for open scissors)."
+            "Opt in to merging predicted fragments for single-tool images in both "
+            "inference passes. Default: review one mask without merging. "
+            "Cannot be used with pending multi-tool images."
         ),
     )
     images.add_argument(

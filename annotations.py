@@ -259,6 +259,13 @@ def tool_id_summary(instances: Iterable[Mapping[str, object]]) -> str:
     return ";".join(sorted(ids, key=numeric_sort_key))
 
 
+def is_multi_tool_image(row: Mapping[str, str]) -> bool:
+    """Use the declared physical tool set to identify multi-tool captures."""
+    tools = {value.strip() for value in row.get("Tool IDs", "").split(";")}
+    tools.discard("")
+    return len(tools) > 1
+
+
 def write_image_manifests(
     manifest: Path,
     images: Sequence[Mapping[str, str]],
@@ -290,7 +297,8 @@ def write_image_manifests(
     ordered_images = sorted(
         image_by_id.values(),
         key=lambda row: (
-            not row.get("Sample ID", "").strip() or not row.get("Angle", "").strip(),
+            not row.get("Sample ID", "").strip()
+            or (not is_multi_tool_image(row) and not row.get("Angle", "").strip()),
             tuple(numeric_sort_key(tool_id) for tool_id in row["Tool IDs"].split(";")),
         ),
     )
@@ -343,3 +351,34 @@ def validate_instance_metadata(instances: Sequence[Mapping[str, str]]) -> None:
             valid = False
         if not valid:
             raise ValueError(f"Instance {identity}: Confidence must be from 0 to 1.")
+
+
+def tool_metadata(path: Path, tool_id: str) -> dict[str, str]:
+    """Resolve a known tool, rejecting inconsistent identification records."""
+    matches = [row for row in read_csv(path) if row.get("Tool ID") == tool_id]
+    if not matches:
+        raise ValueError(
+            f"Unknown Tool ID {tool_id}: identify it in the image object manifest first."
+        )
+    identities = {
+        (row.get("Tool Class", "").strip(), row.get("Tool Name", "").strip()) for row in matches
+    }
+    if len(identities) != 1 or any(not value for value in next(iter(identities))):
+        raise ValueError(
+            f"Tool {tool_id} has missing or conflicting image identification metadata."
+        )
+    try:
+        confidence = min(float(row.get("Confidence", "")) for row in matches)
+        if any(not 0 <= float(row.get("Confidence", "")) <= 1 for row in matches):
+            raise ValueError
+    except ValueError as error:
+        raise ValueError(
+            f"Tool {tool_id} has invalid identification confidence."
+        ) from error
+    tool_class, name = next(iter(identities))
+    return {
+        "Tool ID": tool_id,
+        "Tool Class": tool_class,
+        "Tool Name": name,
+        "Confidence": str(confidence),
+    }
