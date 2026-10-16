@@ -785,8 +785,8 @@ Tool ID,Tool Class,Tool Name,Confidence,Sample ID,Filepath,Image ID,Instance ID,
 50,rongeur,jaritleksell,1,95,images/50/IMG_1811.jpg,image-8fb9ca77f5b87b79,instance-0,,,,,,,,,,,,,,
 0,scissors,iris,0.8,,images/multi/0/IMG_1957.jpg,image-9a099d88fe68c199,instance-6cdb3864ce7d6f77,510,923,443,524,masks/images/multi/0/IMG_1957.npz,0,clear,TRUE,TRUE,TRUE,TRUE,TRUE,TRUE,1.0
 3,pliers,ruskinrongeur,1.0,,images/multi/0/IMG_1957.jpg,image-9a099d88fe68c199,instance-d73415d09bd2347c,1163,323,556,644,masks/images/multi/0/IMG_1957.npz,1,clear,TRUE,TRUE,TRUE,TRUE,TRUE,TRUE,1.0
-0,scissors,iris,0.8,,images/multi/0/IMG_1958.jpg,image-001d97824ad577dd,instance-15b740edad495ca0,,,,,,,,,,,,,,
-3,pliers,ruskinrongeur,1.0,,images/multi/0/IMG_1958.jpg,image-001d97824ad577dd,instance-1a7cfd18b9a92ca8,,,,,,,,,,,,,,
+0,scissors,iris,0.8,,images/multi/0/IMG_1958.jpg,image-001d97824ad577dd,instance-15b740edad495ca0,648,584,401,497,masks/images/multi/0/IMG_1958.npz,0,clear,TRUE,TRUE,TRUE,TRUE,TRUE,TRUE,1.0
+3,pliers,ruskinrongeur,1.0,,images/multi/0/IMG_1958.jpg,image-001d97824ad577dd,instance-1a7cfd18b9a92ca8,702,803,692,311,masks/images/multi/0/IMG_1958.npz,1,clear,TRUE,TRUE,TRUE,TRUE,TRUE,TRUE,1.0
 0,scissors,iris,0.8,,images/multi/0/IMG_1963.jpg,image-edd7d227c148a68e,instance-37dd011ea6087ac6,847,900,466,420,masks/images/multi/0/IMG_1963.npz,0,clear,TRUE,TRUE,TRUE,TRUE,TRUE,TRUE,1.0
 3,pliers,ruskinrongeur,1.0,,images/multi/0/IMG_1963.jpg,image-edd7d227c148a68e,instance-13e8dd5640982d14,867,722,686,326,masks/images/multi/0/IMG_1963.npz,1,clear,TRUE,TRUE,TRUE,TRUE,TRUE,TRUE,1.0
 0,scissors,iris,0.8,,images/multi/0/IMG_1964.jpg,image-7ebfc0d51084d344,instance-bad727dc4d90b22a,893,1027,509,466,masks/images/multi/0/IMG_1964.npz,0,clear,TRUE,TRUE,TRUE,TRUE,TRUE,TRUE,1.0

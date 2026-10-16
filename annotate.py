@@ -30,9 +30,11 @@ from annotations import (
     validate_instance_metadata,
 )
 from masks import mask2xywh, save_mask_bundle
+from mask_cleanup import clean_mask, parse_cleanup
 from image_review import Candidate, review_image_instances
 from image_refinement import refine_tool
-from image_ui import show_tool_review
+from image_ui import candidate_color, collect_clicks, draw_tool_mask, show_tool_review
+from image_spatial import Sam3SpatialBackend
 
 
 class ReviewLog:
@@ -170,11 +172,10 @@ def show_candidates(
 
     figure, axis = plt.subplots(figsize=(8, 8))
     axis.imshow(image)
-    colors = plt.get_cmap("tab20")
     boxes: list[list[int]] = []
     for index, candidate in enumerate(candidates):
         overlay = np.zeros((*candidate.mask.shape, 4), dtype=np.float32)
-        overlay[candidate.mask] = (*colors(index % 20)[:3], 0.48)
+        overlay[candidate.mask] = (*candidate_color(index), 0.48)
         axis.imshow(overlay, interpolation="nearest")
         box = mask2xywh(candidate.mask)
         if box is not None:
@@ -188,7 +189,9 @@ def show_candidates(
                 bbox={"facecolor": "black", "alpha": 0.7},
             )
             axis.add_patch(
-                plt.Rectangle((x, y), width, height, fill=False, color=colors(index))
+                plt.Rectangle(
+                    (x, y), width, height, fill=False, color=candidate_color(index)
+                )
             )
     if boxes and focus:
         left = min(box[0] for box in boxes)
@@ -239,6 +242,8 @@ def review_candidates(
                 "Disable --auto-accept and choose one mask, or explicitly enable --merge-masks."
             )
         return "accepted", list(candidates), [], None, "clear"
+    candidates = list(candidates)
+    before_cleanup: dict[int, Candidate] = {}
     visibility = "clear"
     visibility_by_index = {index: "clear" for index in range(len(candidates))}
     ignored_indices: set[int] = set()
@@ -257,6 +262,7 @@ def review_candidates(
             "a [INDEX]=accept one mask, e=accept empty, r=reject, s=skip, "
             "p TEXT=re-prompt, i [0,2]=mark ignore regions, "
             "v STATE [0,2]=set visibility, "
+            "clean [INDEX] [OP SIZE]=optional cleanup, unclean [INDEX]=undo cleanup, "
             + ("o [0,2]=retain occluded tracks, " if allow_occluded else "")
             + "q=quit"
         )
@@ -264,6 +270,60 @@ def review_candidates(
         plt.close("all")
         command, _, argument = response.partition(" ")
         try:
+            if command in {"clean", "unclean"}:
+                parts = argument.split()
+                if parts and parts[0].isdigit():
+                    index = _parse_indices(parts.pop(0), len(candidates))[0]
+                elif len(candidates) == 1:
+                    index = 0
+                else:
+                    raise ValueError(
+                        "Choose a candidate: clean INDEX [OP SIZE] or unclean INDEX."
+                    )
+                if command == "unclean":
+                    if parts:
+                        raise ValueError("Use unclean [INDEX].")
+                    if index in before_cleanup:
+                        candidates[index] = before_cleanup.pop(index)
+                    if review_log is not None:
+                        review_log.append(
+                            key,
+                            "in_progress",
+                            action="undo_cleanup",
+                            candidate_index=index,
+                        )
+                    continue
+                operation, size = parse_cleanup(" ".join(parts))
+                source = candidates[index]
+                if not source.mask.any():
+                    raise ValueError("Select a nonempty mask before cleanup.")
+                protected = np.zeros_like(source.mask)
+                for ignored_index in ignored_indices - {index}:
+                    protected |= candidates[ignored_index].mask
+                result = clean_mask(source.mask, operation, size, protected=protected)
+                if not result.any():
+                    raise ValueError(
+                        "Cleanup would erase the whole tool; previous mask retained. Try a smaller size."
+                    )
+                before_cleanup.setdefault(index, source)
+                candidates[index] = replace(source, mask=result)
+                added = int(np.count_nonzero(result & ~source.mask))
+                removed_pixels = int(np.count_nonzero(source.mask & ~result))
+                if review_log is not None:
+                    review_log.append(
+                        key,
+                        "in_progress",
+                        action="cleanup",
+                        candidate_index=index,
+                        operation=operation,
+                        size=size,
+                        added_pixels=added,
+                        removed_pixels=removed_pixels,
+                    )
+                print(
+                    f"Candidate {index}: cleanup added {added} and removed {removed_pixels} pixels. Inspect the preview; 'unclean {index}' undoes all cleanup."
+                )
+                continue
             if command == "a":
                 if not argument.strip() and len(candidates) > 1:
                     raise ValueError(
@@ -378,16 +438,38 @@ class Sam3ImageBackend:
     ) -> None:
         from transformers import Sam3Model, Sam3Processor
 
+        self.model_name = model_name
         self.model = Sam3Model.from_pretrained(model_name).to(device).eval()
         self.processor = Sam3Processor.from_pretrained(model_name)
         self.device = device
         self.threshold = threshold
         self.refine_crop = refine_crop
         self.single_tool = single_tool
+        self._spatial_backend: Sam3SpatialBackend | None = None
+        self._spatial_active = False
+
+    def spatial(
+        self,
+        image: Image.Image,
+        points: list[tuple[float, float, int]],
+        seed: NDArray[np.bool_] | None = None,
+    ) -> Candidate:
+        if not self._spatial_active:
+            # Keep only one large image encoder on the accelerator at a time.
+            self.model.to("cpu")
+            self._spatial_active = True
+        if self._spatial_backend is None:
+            self._spatial_backend = Sam3SpatialBackend(self.model_name, self.device)
+        return self._spatial_backend.segment(image, points, seed)
 
     def predict(
         self, images: Sequence[Image.Image], prompts: Sequence[str]
     ) -> list[list[Candidate]]:
+        if self._spatial_active:
+            assert self._spatial_backend is not None
+            self._spatial_backend.offload()
+            self.model.to(self.device)
+            self._spatial_active = False
         candidates = self._predict(images, prompts)
         if self.single_tool:
             candidates = [merge_candidates(result) for result in candidates]
@@ -711,6 +793,9 @@ def annotate_images(args: argparse.Namespace) -> None:
                     key=key,
                     show=show_candidates,
                     show_tools=show_tool_review,
+                    draw=draw_tool_mask,
+                    collect_points=collect_clicks,
+                    spatial=lambda points, seed: backend.spatial(image, points, seed),
                     refine=lambda seed, prompt: refine_tool(
                         image,
                         seed,

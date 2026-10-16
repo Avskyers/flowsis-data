@@ -156,7 +156,7 @@ def test_combined_preview_shows_overview_crops_and_before_refinement(monkeypatch
             figure.axes[1].images[0].get_array(),
             np.asarray(Image.fromarray(pixels).crop(bounds)),
         )
-        assert len(figure.axes[1].collections) == 1  # Original-mask contour.
+        assert not figure.axes[1].collections  # Colored pixels, without mask outlines.
     finally:
         plt.close("all")
 
@@ -340,3 +340,85 @@ def test_failed_retry_keeps_last_successful_refinement(monkeypatch):
         refine=lambda *_: next(replies),
     )
     np.testing.assert_array_equal(result.selected[0].mask, refined.mask)
+
+
+def test_unassigned_mask_is_visible_before_assignment_on_gray_background(monkeypatch):
+    image = Image.new("RGB", (120, 100), (178, 178, 178))
+    mask = candidate((100, 120), (20, 20, 60, 70)).mask
+    mask[30:60, 30:50] = False  # A hole inside the bounding box must remain uncolored.
+    prediction = Candidate(mask, 0.9, "iris scissors [unassigned]", "candidate-0")
+    monkeypatch.setattr(plt, "show", lambda **_: None)
+    monkeypatch.setattr(plt, "pause", lambda _: None)
+    try:
+        show_tool_review(
+            image,
+            [prediction],
+            "image",
+            [ToolPreview("0", "iris scissors", np.zeros_like(mask))],
+        )
+        overview, tool_panel = plt.gcf().axes
+        pixels = np.asarray(overview.images[0].get_array())
+        assert np.any(pixels[mask] != 178)
+        assert np.all(pixels[~mask] == 178)
+        assert np.any(pixels[mask, 0] != pixels[mask, 2])  # Colored rather than gray.
+        assert not overview.collections  # Colored mask pixels, without an outline.
+        assert overview.patches[0].get_linestyle() == ":"
+        assert "0: iris scissors" in [text.get_text() for text in overview.texts]
+        assert any(
+            "No visible mask assigned" == text.get_text() for text in tool_panel.texts
+        )
+    finally:
+        plt.close("all")
+
+
+def test_candidate_palette_does_not_repeat_every_ten_or_twenty_masks():
+    from image_ui import candidate_color
+
+    colors = [candidate_color(index) for index in range(64)]
+    assert len(set(colors)) == 64
+    assert colors[0] != colors[10] and colors[0] != colors[20]
+    assert all(0 <= channel <= 1 for color in colors for channel in color)
+
+
+def test_tool_preview_color_matches_candidate_and_survives_other_removal(monkeypatch):
+    from image_ui import candidate_color
+
+    first = candidate((100, 120), (10, 20, 30, 40))
+    second = candidate((100, 120), (70, 50, 90, 70))
+    image = Image.new("RGB", (120, 100), (178, 178, 178))
+    monkeypatch.setattr(plt, "show", lambda **_: None)
+    monkeypatch.setattr(plt, "pause", lambda _: None)
+    try:
+        show_tool_review(
+            image,
+            [first, second],
+            "image",
+            [
+                ToolPreview("0", "scissors", first.mask, candidate_index=0),
+                ToolPreview("3", "pliers", second.mask, candidate_index=1),
+            ],
+        )
+        before = np.array(plt.gcf().axes[0].images[0].get_array())
+        np.testing.assert_allclose(
+            plt.gcf().axes[2].title.get_color(), candidate_color(1)
+        )
+        overlay = np.asarray(plt.gcf().axes[2].images[1].get_array())
+        np.testing.assert_array_equal(
+            overlay[overlay[:, :, 3] > 0][0, :3],
+            [round(value * 255) for value in candidate_color(1)],
+        )
+        plt.close("all")
+        removed = replace(first, mask=np.zeros_like(first.mask), prompt="[removed]")
+        show_tool_review(
+            image,
+            [removed, second],
+            "image",
+            [ToolPreview("3", "pliers", second.mask, candidate_index=1)],
+        )
+        after = np.asarray(plt.gcf().axes[0].images[0].get_array())
+        np.testing.assert_array_equal(before[second.mask], after[second.mask])
+        np.testing.assert_allclose(
+            plt.gcf().axes[1].title.get_color(), candidate_color(1)
+        )
+    finally:
+        plt.close("all")
