@@ -235,8 +235,12 @@ one by its preview number; this still uses the single-tool interface.
 
 Optional `--merge-masks` (also accepted as `--single-tool`) merges predicted
 fragments into one mask during inference. It is only for captures known to need
-fragment union, and cannot be used with pending multi-tool images. Prompts use `Tool Class` by default;
-use `--image-prompt name-and-class` for prompts such as "iris scissors".
+fragment union, and cannot be used with pending multi-tool images. Prompts use `Tool Class` by default. When two or more declared tools share a
+class within an image, their prompts automatically include names, such as
+"iris scissors" and "mayo scissors". Classes unique within the image retain
+class-only prompts. Use `--image-prompt name-and-class` to include names for all
+tools. Identical resulting prompts run once, while physical identities remain
+separate assignments.
 A second pass refines a padded crop by default; disable it with
 `--no-refine-crop`.
 
@@ -361,8 +365,10 @@ apply; add `--skipped-first` to prioritize previously skipped multi-tool images.
 Without this flag, both kinds of images are reviewed in manifest order.
 
 Run multi-tool annotation **without** `--merge-masks`/`--single-tool` or `--auto-accept`.
-The model runs each unique declared label once per image, so two scissors share
-a prompt but still require separate identity assignments. Optional
+The model runs each unique prompt once per image. Tools sharing a class use
+`name class` prompts to distinguish variants, such as `iris scissors` and
+`mayo scissors`. Tools with the same name and class still share a prompt and
+require separate Tool ID assignments. Optional
 `--discovery-prompt` and `--canonical-prompt` add predictions. All candidates are
 retained for explicit review, including possible duplicates and overlapping
 masks. Automatic crop refinement is disabled for batches containing multi-tool

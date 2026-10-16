@@ -148,6 +148,7 @@ def test_combined_preview_shows_overview_crops_and_before_refinement(monkeypatch
         figure = plt.gcf()
         assert len(figure.axes) == 3
         assert "Overview" in figure.axes[0].get_title()
+        assert any(text.get_text() == "0: scissors" for text in figure.axes[0].texts)
         assert "Tool 0" in figure.axes[1].get_title()
         assert "Tool 3" in figure.axes[2].get_title()
         bounds = tool_crop(seed.mask | current.mask)

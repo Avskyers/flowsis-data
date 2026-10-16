@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
@@ -139,6 +140,23 @@ def image_prompt(row: Mapping[str, str], style: str, aliases: Mapping[str, str])
     if not prompt:
         raise ValueError("An image row must have a Tool Class or Tool Name prompt.")
     return prompt
+
+
+def image_prompts(
+    instances: Sequence[Mapping[str, str]], style: str, aliases: Mapping[str, str]
+) -> list[str]:
+    """Include names when several tools share a class in this image."""
+    classes = [
+        " ".join(row.get("Tool Class", "").casefold().split()) for row in instances
+    ]
+    counts = Counter(classes)
+    prompts = [
+        image_prompt(
+            row, "name-and-class" if counts[tool_class] > 1 else style, aliases
+        )
+        for row, tool_class in zip(instances, classes, strict=True)
+    ]
+    return list(dict.fromkeys(prompts))
 
 
 def show_candidates(
@@ -616,10 +634,9 @@ def annotate_images(args: argparse.Namespace) -> None:
             prompt_lists.append(
                 list(
                     dict.fromkeys(
-                        [
-                            image_prompt(instance, args.image_prompt, aliases)
-                            for instance in sources[row[IMAGE_ID_FIELD]]
-                        ]
+                        image_prompts(
+                            sources[row[IMAGE_ID_FIELD]], args.image_prompt, aliases
+                        )
                         + [
                             normalize_tool_name(prompt, aliases)
                             for prompt in [
@@ -1005,8 +1022,8 @@ def parse_args() -> argparse.Namespace:
         choices=("tool-class", "name-and-class"),
         default="tool-class",
         help=(
-            "Prompt SAM3 with Tool Class (default), or combine Tool Name and "
-            "Tool Class."
+            "Prompt SAM3 with Tool Class (default; includes names for shared classes), "
+            "or always combine Tool Name and Tool Class."
         ),
     )
     images.add_argument(

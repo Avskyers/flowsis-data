@@ -54,7 +54,12 @@ def show_tool_review(
             )
         )
         overview.text(
-            x, y, str(index), color="white", bbox={"facecolor": "black", "alpha": 0.7}
+            x,
+            y,
+            f"{index}: {candidate.prompt.split(' [', 1)[0]}",
+            fontsize=8,
+            color="white",
+            bbox={"facecolor": "black", "alpha": 0.7},
         )
         # Unassigned candidates remain visible until assigned, excluded, or ignored.
         if "[unassigned]" in candidate.prompt:

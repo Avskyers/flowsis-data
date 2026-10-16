@@ -161,8 +161,8 @@ def review_image_instances(
         for row in instances:
             identity = row["Instance ID"]
             print(
-                f"  tool {row['Tool ID']} | {row['Tool Class']} | "
-                f"{row['Tool Name']} | confidence {row['Confidence']} | "
+                f"  tool {row['Tool ID']} | {canonical_tool_label(row['Tool Name'], row['Tool Class'], {})} | "
+                f"confidence {row['Confidence']} | "
                 f"{states.get(identity, 'unresolved')} | masks {assignments.get(identity, [])}"
                 + (
                     " | refined (restore TOOL_ID to undo)"

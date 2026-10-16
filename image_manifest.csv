@@ -791,6 +791,14 @@ Tool IDs,Sample ID,Angle,Filepath,Lights,Make,Model,Flash,ISO,Exposure,Aperture,
 0;3,,,images/multi/0/IMG_1967.jpg,,,,,,,,,,image-ddf6ed1e2704ae71,session-unknown-006
 0;3,,,images/multi/0/IMG_1968.jpg,,,,,,,,,,image-ac0aae21ef673b7c,session-unknown-007
 0;3,,,images/multi/0/IMG_1971.jpg,,,,,,,,,,image-0f08334cbdf244c9,session-unknown-008
+0;48,,,images/multi/1/IMG_1710.jpg,,,,,,,,,,image-cd0100d763c02ede,session-unknown-009
+0;48,,,images/multi/1/IMG_1711.jpg,,,,,,,,,,image-a80d4653394a067e,session-unknown-010
+0;48,,,images/multi/1/IMG_1713.jpg,,,,,,,,,,image-84ae18bcb1eff75d,session-unknown-011
+0;48,,,images/multi/1/IMG_1714.jpg,,,,,,,,,,image-ce728221d95133d4,session-unknown-012
+0;48,,,images/multi/1/IMG_1715.jpg,,,,,,,,,,image-bd75236f694e7357,session-unknown-013
+0;48,,,images/multi/1/IMG_1716.jpg,,,,,,,,,,image-8c74d0bb208a6d55,session-unknown-014
+0;48,,,images/multi/1/IMG_1719.jpg,,,,,,,,,,image-2396aeb3fe76b3bf,session-unknown-015
+0;48,,,images/multi/1/IMG_1720.jpg,,,,,,,,,,image-3edf9eecdb0b2bf2,session-unknown-016
 4,,,images/4/IMG_2430.jpg,,Apple,iPhone 14 Pro Max,FALSE,160,1/60,1.78,6.86,2026-09-02T12:32:04.625-04:00,image-c729345a587a7e30,session-2026-09-02-001
 4,,,images/4/IMG_2431.jpg,,Apple,iPhone 14 Pro Max,FALSE,125,1/60,1.78,6.86,2026-09-02T12:32:13.799-04:00,image-f6c6336d4e6b88e3,session-2026-09-02-001
 4,,,images/4/IMG_2432.jpg,,Apple,iPhone 14 Pro Max,FALSE,125,1/60,1.78,6.86,2026-09-02T12:32:23.116-04:00,image-27fa784325966064,session-2026-09-02-001

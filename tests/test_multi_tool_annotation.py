@@ -177,14 +177,21 @@ def test_cli_saves_overlapping_tools_and_resumes(monkeypatch, tmp_path):
         def predict(self, images, prompts):
             assert not self.refine_crop
             prompts_seen.extend(prompts)
-            return [candidates() if prompt == "scissors" else [] for prompt in prompts]
+            return [
+                (
+                    [candidates()[0], candidates()[2]]
+                    if prompt == "tool 12 scissors"
+                    else [candidates()[1]] if prompt == "tool 13 scissors" else []
+                )
+                for prompt in prompts
+            ]
 
     monkeypatch.setattr(annotate, "Sam3ImageBackend", Backend)
     monkeypatch.setattr(annotate, "show_candidates", lambda *args: None)
-    commands = iter(["g a 0,2", "g b 1", "v c occluded", "a"])
+    commands = iter(["g a 0,1", "g b 2", "v c occluded", "a"])
     monkeypatch.setattr("builtins.input", lambda _: next(commands))
     annotate.main()
-    assert prompts_seen == ["scissors", "forceps"]  # Same-class tools share inference.
+    assert prompts_seen == ["tool 12 scissors", "tool 13 scissors", "forceps"]
     bundle = load_mask_bundle("masks/images/tools.npz")
     assert bundle.identities == ("a", "b")
     assert np.any(bundle.masks[0] & bundle.masks[1])
@@ -201,7 +208,7 @@ def test_cli_saves_overlapping_tools_and_resumes(monkeypatch, tmp_path):
         read_csv("image_manifest.csv")[0], rows
     )
     annotate.main()
-    assert prompts_seen == ["scissors", "forceps"]
+    assert prompts_seen == ["tool 12 scissors", "tool 13 scissors", "forceps"]
 
 
 @pytest.mark.parametrize("flag", ["--merge-masks", "--single-tool", "--auto-accept"])
@@ -232,7 +239,7 @@ def test_high_iou_candidates_survive_until_review(monkeypatch, tmp_path):
 
         def predict(self, images, prompts):
             return [
-                [Candidate(mask.copy(), 0.9, prompt, str(index)) for index in range(2)]
+                [Candidate(mask.copy(), 0.9, prompt, str(index)) for index in range(1)]
                 for prompt in prompts
             ]
 
@@ -563,3 +570,51 @@ def test_new_tool_command_generates_internal_instance_id(monkeypatch, tmp_path):
     assert added["Tool ID"] == "3"
     assert added["Instance ID"] == stable_media_id("instance", "image-1/3")
     assert result.selected[1].identity == added["Instance ID"]
+
+
+def test_shared_classes_use_name_and_class_prompts():
+    rows = [
+        {**instance("a", "0"), "Tool Name": "iris"},
+        {**instance("b", "3"), "Tool Name": "mayo"},
+        {**instance("c", "4", "pliers"), "Tool Name": "rongeur"},
+    ]
+    assert annotate.image_prompts(rows, "tool-class", {}) == [
+        "iris scissors",
+        "mayo scissors",
+        "pliers",
+    ]
+    assert annotate.image_prompts(rows, "name-and-class", {}) == [
+        "iris scissors",
+        "mayo scissors",
+        "rongeur pliers",
+    ]
+    # Class sharing is determined within each image, not across the batch.
+    assert annotate.image_prompts(rows[:1], "tool-class", {}) == ["scissors"]
+
+
+def test_shared_class_prompt_normalization_and_deduplication():
+    rows = [
+        {**instance("a", "0", " scissors "), "Tool Name": "iris scissors"},
+        {**instance("b", "3", "scissors"), "Tool Name": "iris"},
+    ]
+    assert annotate.image_prompts(rows, "tool-class", {}) == ["iris scissors"]
+    assert annotate.image_prompts(rows, "tool-class", {"iris": "fine"}) == [
+        "iris scissors",
+        "fine scissors",
+    ]
+
+
+def test_declared_tools_display_name_class_label(monkeypatch, tmp_path, capsys):
+    result, _ = interactive_review(
+        monkeypatch,
+        tmp_path,
+        ["q"],
+        rows=[
+            {**instance("a", "0"), "Tool Name": "iris"},
+            {**instance("b", "3"), "Tool Name": "mayo"},
+        ],
+    )
+    output = capsys.readouterr().out
+    assert "tool 0 | iris scissors |" in output
+    assert "tool 3 | mayo scissors |" in output
+    assert result.decision == "quit"
