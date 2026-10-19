@@ -18,6 +18,8 @@ def backend_with_predictions(
     backend = object.__new__(Sam3ImageBackend)
     backend.refine_crop = enabled
     backend.single_tool = single_tool
+    backend._spatial_active = False
+    backend._spatial_backend = None
     calls = []
     responses = iter(responses)
 

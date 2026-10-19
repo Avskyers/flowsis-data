@@ -254,6 +254,9 @@ In the terminal review prompt:
 - `p TEXT` reruns segmentation with another prompt.
 - `i 0,2` marks ignore regions; `v partial 0` sets the mask's visibility
   (`clear`, `partial`, or `severe`).
+- `clean` optionally removes tiny holes and specks from the sole candidate;
+  `clean 0 close 3` targets candidate 0 with a 3-pixel closing kernel. `unclean 0`
+  restores it. See the cleanup options below.
 - `q` quits. Rerunning the same command resumes unfinished images.
 
 Previously skipped images are shown after other unfinished images. Each group
@@ -413,8 +416,30 @@ If there are **no candidates**, try `p TEXT` with a suitable tool description,
 inspect the new predictions, and assign them. Use `s` to defer an image if
 prediction still fails. `a` alone does not assign masks in multi-tool review.
 
+Candidate colors are determined by their stable candidate numbers, using a
+spread-out palette that does not wrap every 10 or 20 candidates. A tool's
+assigned mask uses the same color in the overview and its zoom panel as its
+selected candidate. Grouped fragments use the first selected candidate's color
+for the combined tool mask. Reassigning to a new candidate changes that tool's
+color; removing other candidates does not. Overlapping candidate pixels can
+still blend their colors in the overview.
+
+Use `remove 1,3` to discard unwanted candidates from the preview and active
+list. Candidate numbers are never renumbered or reused within the current
+image review session. Removing an assigned
+candidate clears the affected tool's entire assignment, including grouped
+fragments, refinement, and spatial prompts; assign that tool again before
+accepting. It also removes any ignore-region membership. Other assignments
+remain unchanged, and already-derived masks are not recomputed automatically.
+Removed masks cannot be reassigned or used for subtraction. Use `x 1,3` when
+you want to exclude candidates while retaining them for possible reassignment.
+Removal is recorded in the review log and does not change the final mask format.
+
 The multi-tool preview combines a full-image overview with one zoomed panel
-per declared tool. Candidate numbers remain visible in the overview. Assigned
+per declared tool. Before any assignment, the overview shows each unassigned
+candidate as a colored mask overlay with a numbered dotted bounding box. Colored pixels show the actual mask; the bounding box
+alone does not indicate which tool pixels were segmented. Candidate numbers
+remain visible in the overview. Assigned
 tools use consistent colors in the overview and their crop panels; original
 image context remains visible around each tool, including overlapping tools.
 Panels without an assigned visible mask show a placeholder.
@@ -442,8 +467,8 @@ mask or guarantee correct identity.
 Results touching an interior crop edge retry with more padding, up to three
 crop sizes. A boundary at the edge of the actual image is allowed. Refinement
 never merges crop predictions automatically. In each tool panel, the colored
-mask is the current result and a dashed gold outline shows the original assigned
-mask after a refinement. `restore TOOL_ID` returns to that original assignment;
+mask is the current result; mask outlines are not drawn. `restore TOOL_ID`
+returns to the original assignment;
 `restore all` restores all tools. You can retry refinement or accept the current
 results with `a`. Refining one tool does not change another tool's assignment.
 Assigning different candidates with `g`, clearing with `u`, or marking a tool
@@ -456,14 +481,182 @@ current reviewer session. Accept to save them before quitting. No new manifest
 columns or cropped training images are required: final masks retain the original
 image dimensions and stable Instance IDs.
 
+When one prediction covers several tools, you can derive a remainder by
+subtracting independently identified visible masks. This uses the assumption
+that visible pixels of different physical tools are disjoint. For a combined
+candidate 0 containing tools 0 and 3:
+
+```text
+review> draw 3
+review> subtract 0 0 3
+review> x 0
+review> a
+```
+
+For model-assisted separation, **start with `click 3`** rather than tracing an
+exact mask. Left-click visible pixels of tool 3 (foreground), and right-click
+the neighboring tool and background (negative prompts). Include positive points
+on each visible part you want retained, not only a small problem area.
+Backspace undoes a point; Enter runs SAM3; Esc or closing cancels. Turn off the
+Matplotlib toolbar's zoom/pan mode before placing points. This can start with
+no candidate or assignment for tool 3.
+
+```text
+review> click 3
+review> click 3
+review> subtract 0 0 3
+review> x 0
+review> a
+```
+
+Repeating `click 3` reopens the active prompt with its earlier points and updates
+**the same candidate**, keeping its number and color. Add foreground/background
+corrections or use Backspace to undo points. The reviewer lists saved prompt
+candidate numbers and click counts for each tool.
+
+For an obscured tool with separate visible portions, use independent prompts:
+
+```text
+review> click 3
+review> click 3 new
+review> click 3 1
+```
+
+`click 3 new` starts with no points or polygon seed, adds a new candidate, and
+keeps the tool's existing assigned portions. `click 3 1` reopens the prompt for
+candidate 1 belonging to tool 3; subsequent `click 3` edits that prompt. Each
+prompt has its own click history. Editing one portion preserves the others;
+the final annotation combines their pixels into one tool mask, preserving gaps.
+Inspect each result: independent prompts can still return overlapping or overly
+broad masks. Use `g 3 INDEX[,INDEX...]` to choose which candidates belong to the
+tool, or `remove INDEX` to discard a candidate. Removing an assigned candidate
+clears that tool's assignment, so regroup the remaining portions afterwards.
+
+`click 3 reset` clears the active prompt's points and polygon seed, then updates
+that same candidate after you provide fresh points. Other portions remain
+assigned. Esc cancels without changing the active prompt. If SAM3 cannot satisfy
+the clicks, the previous mask stays assigned and the draft points remain
+available for another attempt. Prompt histories last for the current reviewer
+session; nonremoved prompts remain selectable by candidate number even after
+clearing or changing an assignment.
+
+The first successful click prompt creates and assigns a model-generated candidate.
+Unless you use `new`, starting a prompt without an existing click history replaces
+the tool's assignment. Superseded candidates generated for that tool by drawing,
+subtraction, or spatial prompting are automatically excluded; other tools and
+initial SAM candidates remain unchanged. Clicks and grouping actions are recorded
+in the review log; the final mask format is unchanged.
+
+Alternatively, **`polygon 3` uses a rough polygon as a SAM3 prompt**, rather than
+saving the polygon as the final segmentation. The polygon editor works as below;
+Enter sends the coarse mask to SAM3's image tracker as a dense mask prompt.
+Inspect the returned model mask. `click 3` afterwards combines additional points
+with that polygon prompt, useful for removing included background or separating
+a neighboring tool. If the current assigned mask is unsuitable as an editor
+starting point, clear it with `u 3` first. `draw 3` remains available for exact
+manual annotation without model inference.
+
+These commands use [SAM3's image tracker point and mask prompting](https://huggingface.co/docs/transformers/v5.13.1/en/model_doc/sam3_tracker).
+The interactive model loads on first use, and repeated prompts on the same image
+reuse its image features. Text and interactive models take turns on the selected
+device to limit accelerator memory. A spatial prompt guides the model; it does
+not guarantee a correct full boundary or complete tool separation. Inspect the
+result before subtraction or acceptance. Prompt editing state is session-local;
+accepted masks retain the usual full-image coordinates and Tool IDs.
+
+`draw 3` opens a polygon editor for tool 3. Click vertices around its visible
+pixels, then click the first vertex to close each polygon. Use `+` for additive
+pieces and `-` to remove background or holes; multiple polygons support
+separated visible pieces. `z` undoes the last completed polygon, Enter saves,
+and Esc or closing the editor cancels. Zoom using the Matplotlib toolbar before
+drawing as needed, then turn off zoom/pan before placing vertices. The editor starts from the tool's current mask; use `u 3`
+first if you want to start blank. Saving creates a new candidate and assigns
+it to that Tool ID automatically. A correct SAM candidate can be assigned with
+`g 3 INDEX` instead of drawing.
+
+`subtract 0 0 3` means **assign tool 0 the pixels of candidate 0 minus tool 3's
+current assigned mask**. It creates and assigns a new candidate, retaining the
+source combined candidate unchanged. Exclude unused combined or duplicate
+candidates with `x` before accepting. For several known masks, use a
+comma-separated Tool ID list, for example `subtract 0 0 3,7`. Refined masks are
+used when available. Drawing/subtraction replaces the target's assignment and
+clears its crop refinement; other tools are unchanged. Original candidate
+assignments can be restored with `g`.
+
+Subtraction cannot infer a split when both inputs still contain all the tools.
+At least one independently correct tool mask is required, and the combined mask
+must cover the desired remaining tool. Missing or extra pixels in either input
+can affect the remainder, so inspect both colored masks before accepting. Only
+visible surfaces are annotated; subtraction does not fill hidden regions.
+Operations are recorded in the review log, and final mask format is unchanged.
+Manual edits are saved to masks on acceptance, not when quitting an unfinished
+review.
+
+Cleanup is **optional and off by default**. After prompting, merging, and
+subtraction, use `clean TOOL_ID [OPERATION [SIZE]]` to postprocess the current
+full-resolution tool mask, then inspect its zoom panel before `a`:
+
+```text
+review> clean 3
+review> clean 3 open 3
+review> clean 3 close 3
+review> unclean 3
+```
+
+| Operation | Size meaning and default | Effect |
+| --- | --- | --- |
+| `small` (default) | Maximum region area, 16 pixels | Remove detached foreground specks and fill enclosed holes at or below the area limit. |
+| `holes` | Maximum hole area, 16 pixels | Fill only small enclosed holes; leave larger holes and background connected to an image edge. |
+| `specks` | Maximum component area, 16 pixels | Remove only small disconnected foreground components. |
+| `open` | Odd kernel width, 3 pixels | Erode then dilate with an elliptical kernel to remove thin slivers and protrusions. |
+| `close` | Odd kernel width, 3 pixels | Dilate then erode to fill narrow gaps, notches, and small holes. |
+| `smooth` | Odd kernel width, 3 pixels | Apply opening followed by closing. |
+
+For example, `clean 3 holes 8` fills enclosed defects of at most 8 pixels;
+`clean 3 open 3` can remove long pixel-wide subtraction remnants that an area
+filter would keep. Sizes refer to saved image pixels, not display pixels.
+Foreground components use 8-connectivity and holes use 4-connectivity.
+
+Repeated cleanup commands act on the current result. `unclean 3` undoes **all**
+cleanup for tool 3, preserving any preceding crop refinement. Cleanup acts on the
+union of assigned fragments, without changing candidate numbers or click
+histories. The preview marks cleaned tools and reports added/removed pixel
+counts. Growing operations cannot claim pixels currently assigned to other
+tools or marked as ignored; existing overlaps are not resolved automatically.
+Subtraction uses the current cleaned mask of each tool being subtracted.
+Reassigning, drawing, reprompting that tool with clicks/polygons, or successfully
+refining it clears its previous cleanup. `restore` clears both cleanup and crop
+refinement. Changes are logged and only saved to the usual mask bundle on acceptance.
+
+Inspect tips, teeth, finger holes, and disconnected visible portions carefully:
+opening can erase real narrow features, closing can join tools or bridge an
+occlusion gap, and area filters can remove small real portions or fill small
+real openings. Cleanup cannot determine the correct semantic boundary. Use
+additional model prompts or localized drawing for those errors. For best
+subtraction results, correct the known tool first, subtract its current mask,
+then clean the remainder only if needed.
+
+In the simple single-tool reviewer, use `clean [INDEX] [OPERATION [SIZE]]` and
+`unclean [INDEX]`; omit the candidate index only when exactly one candidate is
+available. For example, `clean holes 8` or `clean 0 open 3`. No cleanup is applied
+by `--auto-accept`, and existing saved masks are not rewritten by these commands.
+These controls currently apply to image review.
+
 | Command | Action |
 | --- | --- |
 | `g TOOL_ID 0,2` | Assign or combine candidates 0 and 2 into this tool's mask; replaces its previous assignment. |
 | `u TOOL_ID` | Clear an assignment, its refinement, and its visibility state. |
+| `click TOOL_ID [new\|INDEX\|reset]` | Revise the active SAM3 click prompt in place; `new` adds an independent portion, `INDEX` selects an earlier prompt, and `reset` clears the active prompt. |
+| `polygon TOOL_ID` | Draw a coarse mask prompt and let SAM3 generate the boundary; follow with `click TOOL_ID` for corrections. |
+| `draw TOOL_ID` | Trace/edit visible mask pixels using additive and subtractive polygons; automatically assign the saved result. |
+| `subtract TOOL_ID BASE_INDEX OTHER_TOOL_IDS` | Assign the source candidate minus one or more other tools' current masks; separate the other Tool IDs with commas. |
+| `clean TOOL_ID [OPERATION [SIZE]]` | Optionally clean the current tool mask; inspect its preview before accepting. |
+| `unclean TOOL_ID` | Undo all cleanup for this tool, preserving its crop refinement and assignment. |
 | `refine TOOL_ID [TEXT]` / `refine all` | Refine assigned tools using crops of the original image; inspect the updated panels. |
-| `restore TOOL_ID` / `restore all` | Discard refinements and restore the original assigned masks. |
+| `restore TOOL_ID` / `restore all` | Discard cleanup and crop refinements and restore the original assigned masks. |
 | `v TOOL_ID partial` | Set `clear`, `partial`, `severe`, `occluded`, or `absent`. Occluded means fully hidden; absent means not in the image. |
-| `x 1,3` | Exclude false or duplicate candidates. |
+| `remove 1,3` | Discard candidates from the preview and active list without renumbering; affected tools become unresolved. |
+| `x 1,3` | Exclude false or duplicate candidates, retaining them for possible reassignment. |
 | `i 1,3` | Add candidates to the shared ignore region. |
 | `p forceps` | Append predictions using another prompt while preserving existing assignments. |
 | `n TOOL_ID "CLASS" "NAME" CONFIDENCE` | Declare an unexpected tool with complete metadata. Quote multiword class/name values. |

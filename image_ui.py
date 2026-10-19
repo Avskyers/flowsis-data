@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import colorsys
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -16,6 +17,7 @@ from masks import mask2xywh
 
 if TYPE_CHECKING:
     from image_review import Candidate
+    from matplotlib.backend_bases import KeyEvent, MouseEvent
 
 
 @dataclass(frozen=True)
@@ -24,6 +26,13 @@ class ToolPreview:
     label: str
     mask: NDArray[np.bool_]
     original: NDArray[np.bool_] | None = None
+    candidate_index: int | None = None
+    edit_note: str = ""
+
+
+def candidate_color(index: int) -> tuple[float, float, float]:
+    """Keep each candidate's color stable without wrapping a short palette."""
+    return colorsys.hsv_to_rgb((0.59 + index * 0.618033988749895) % 1, 0.8, 0.92)
 
 
 def show_tool_review(
@@ -41,16 +50,26 @@ def show_tool_review(
     overview = figure.add_subplot(grid[:, 0])
     overview_pixels = np.array(image.convert("RGB"))
     figure.suptitle(title, fontsize=11, y=0.98)
-    overview.set_title("Overview — numbered mask candidates", fontsize=10)
+    overview.set_title(
+        "Overview — numbered mask candidates\nColor = mask pixels; dotted rectangles = boxes",
+        fontsize=10,
+    )
     overview.axis("off")
     for index, candidate in enumerate(candidates):
         box = mask2xywh(candidate.mask)
         if box is None:
             continue
         x, y, width, height = box
+        unassigned = "[unassigned]" in candidate.prompt
+        color = candidate_color(index)
         overview.add_patch(
             plt.Rectangle(
-                (x, y), width, height, fill=False, edgecolor="gray", linestyle=":"
+                (x, y),
+                width,
+                height,
+                fill=False,
+                edgecolor=color if unassigned else "gray",
+                linestyle=":",
             )
         )
         overview.text(
@@ -62,13 +81,16 @@ def show_tool_review(
             bbox={"facecolor": "black", "alpha": 0.7},
         )
         # Unassigned candidates remain visible until assigned, excluded, or ignored.
-        if "[unassigned]" in candidate.prompt:
+        if unassigned:
             overview_pixels[candidate.mask] = (
-                0.7 * overview_pixels[candidate.mask] + 0.3 * 178
+                0.5 * overview_pixels[candidate.mask] + 0.5 * np.array(color) * 255
             ).astype(np.uint8)
-    colors = plt.get_cmap("tab10")
     for index, tool in enumerate(tools):
-        color = colors(index % 10)[:3]
+        color = candidate_color(
+            tool.candidate_index
+            if tool.candidate_index is not None
+            else len(candidates) + index
+        )
         axis = figure.add_subplot(grid[index // columns, 1 + index % columns])
         axis.set_title(f"Tool {tool.tool_id} — {tool.label}", color=color, fontsize=10)
         axis.axis("off")
@@ -102,17 +124,10 @@ def show_tool_review(
         overlay[crop_mask] = (*[round(channel * 255) for channel in color], 115)
         axis.imshow(overlay, interpolation="nearest")
         if tool.original is not None and not np.array_equal(tool.original, tool.mask):
-            axis.contour(
-                tool.original[top:bottom, left:right],
-                levels=[0.5],
-                colors=["gold"],
-                linestyles="dashed",
-                linewidths=1,
-            )
             axis.text(
                 0.02,
                 0.02,
-                "Color: current mask | dashed gold: original",
+                tool.edit_note or f"Refined mask — restore {tool.tool_id} to undo",
                 transform=axis.transAxes,
                 fontsize=8,
                 bbox={"facecolor": "white", "alpha": 0.8},
@@ -123,3 +138,175 @@ def show_tool_review(
     )
     plt.show(block=False)
     plt.pause(0.001)
+
+
+def paint_polygon(
+    mask: NDArray[np.bool_], vertices: Sequence[tuple[float, float]], *, add: bool
+) -> None:
+    """Paint pixel centers inside a polygon, with bounded temporary coordinate arrays."""
+    from matplotlib.path import Path
+
+    if len(vertices) < 3:
+        raise ValueError("A polygon needs at least three vertices.")
+    points: NDArray[np.float64] = np.asarray(vertices, dtype=np.float64)
+    if points.shape != (len(vertices), 2) or not np.isfinite(points).all():
+        raise ValueError("Polygon coordinates must be finite x/y pairs.")
+    height, width = mask.shape
+    left = max(0, int(np.floor(points[:, 0].min())))
+    right = min(width, int(np.ceil(points[:, 0].max())) + 1)
+    top = max(0, int(np.floor(points[:, 1].min())))
+    bottom = min(height, int(np.ceil(points[:, 1].max())) + 1)
+    if left >= right or top >= bottom:
+        return
+    path = Path(points)
+    for start in range(top, bottom, 256):
+        stop = min(bottom, start + 256)
+        x: NDArray[np.int64]
+        y: NDArray[np.int64]
+        x, y = np.meshgrid(np.arange(left, right), np.arange(start, stop))
+        inside = path.contains_points(
+            np.column_stack((x.ravel(), y.ravel())), radius=1e-9
+        ).reshape(x.shape)
+        region = mask[start:stop, left:right]
+        region[inside] = add
+
+
+def draw_tool_mask(
+    image: Image.Image, initial: NDArray[np.bool_], title: str = "Tool mask"
+) -> NDArray[np.bool_] | None:
+    """Trace visible tool pixels with additive/subtractive polygons; closing cancels."""
+    import matplotlib.pyplot as plt
+    from matplotlib.widgets import PolygonSelector
+
+    if initial.shape != (image.height, image.width):
+        raise ValueError("Initial drawing mask must have full-image dimensions.")
+    figure, axis = plt.subplots(figsize=(10, 8))
+    figure.suptitle(title, fontsize=12)
+    figure.subplots_adjust(top=0.85)
+    axis.imshow(image)
+    mask = initial.copy()
+    overlay = np.zeros((*mask.shape, 4), dtype=np.uint8)
+    overlay[mask] = (0, 180, 255, 128)
+    layer = axis.imshow(overlay, interpolation="nearest")
+    axis.axis("off")
+    mode = True
+    history: list[tuple[list[tuple[float, float]], bool]] = []
+    result: NDArray[np.bool_] | None = None
+
+    def refresh() -> None:
+        overlay[:] = 0
+        overlay[mask] = (0, 180, 255, 128)
+        layer.set_data(overlay)
+        axis.set_title(
+            f"{'ADD' if mode else 'REMOVE'} visible pixels: click polygon vertices; click first vertex to close\n"
+            "+ add | - remove (holes/background) | z undo polygon | Enter save | Esc cancel",
+            fontsize=10,
+        )
+        figure.canvas.draw_idle()
+
+    def select(vertices: list[tuple[float, float]], *_events: object) -> None:
+        if len(vertices) < 3:
+            return
+        history.append((list(vertices), mode))
+        paint_polygon(mask, vertices, add=mode)
+        selector.clear()
+        refresh()
+
+    selector = PolygonSelector(axis, select, props={"color": "cyan", "linewidth": 1.2})
+
+    def keypress(event: KeyEvent) -> None:
+        nonlocal mode, result
+        if event.key in {"+", "=", "-"}:
+            mode = event.key != "-"
+            selector.clear()
+        elif event.key == "z":
+            selector.clear()
+            if history:
+                history.pop()
+                mask[:] = initial
+                for vertices, add in history:
+                    paint_polygon(mask, vertices, add=add)
+        elif event.key == "enter":
+            if selector.verts:
+                print(
+                    "Close the current polygon by clicking its first vertex before saving."
+                )
+                return
+            result = mask.copy()
+            plt.close(figure)
+            return
+        elif event.key == "escape":
+            plt.close(figure)
+            return
+        refresh()
+
+    connection = figure.canvas.mpl_connect("key_press_event", keypress)
+    refresh()
+    try:
+        plt.show(block=True)
+    finally:
+        selector.disconnect_events()
+        figure.canvas.mpl_disconnect(connection)
+        plt.close(figure)
+    return result
+
+
+def collect_clicks(
+    image: Image.Image,
+    mask: NDArray[np.bool_],
+    initial_points: list[tuple[float, float, int]],
+    title: str = "Tool point prompts",
+) -> list[tuple[float, float, int]] | None:
+    import matplotlib.pyplot as plt
+    from matplotlib.backend_bases import MouseButton
+
+    plt.close("all")
+    figure, axis = plt.subplots(figsize=(9, 8))
+    axis.imshow(image)
+    overlay = np.zeros((*mask.shape, 4), dtype=np.float32)
+    overlay[mask] = (0.0, 0.8, 0.3, 0.4)
+    axis.imshow(overlay)
+    figure.suptitle(title, fontsize=12)
+    figure.subplots_adjust(top=0.85)
+    axis.set_title(
+        "Left click: target tool; right click: other tools/background.\n"
+        "Backspace: undo. Enter: run SAM3. Esc: cancel. Turn off toolbar zoom/pan to add points.",
+        fontsize=10,
+    )
+    points = list(initial_points)
+    markers = [
+        axis.scatter([x], [y], c="lime" if label else "red", marker="+", s=100)
+        for x, y, label in points
+    ]
+    accepted = False
+
+    def click(event: MouseEvent) -> None:
+        if axis.get_navigate_mode() is not None:
+            return
+        if event.inaxes != axis or event.xdata is None or event.ydata is None:
+            return
+        if event.button not in {MouseButton.LEFT, MouseButton.RIGHT}:
+            return
+        label = int(event.button == MouseButton.LEFT)
+        x = min(max(float(event.xdata), 0), image.width - 1)
+        y = min(max(float(event.ydata), 0), image.height - 1)
+        points.append((x, y, label))
+        markers.append(
+            axis.scatter([x], [y], c="lime" if label else "red", marker="+", s=100)
+        )
+        figure.canvas.draw_idle()
+
+    def key(event: KeyEvent) -> None:
+        nonlocal accepted
+        if event.key == "backspace" and points:
+            points.pop()
+            markers.pop().remove()
+            figure.canvas.draw_idle()
+        elif event.key in {"enter", "escape"}:
+            accepted = event.key == "enter"
+            plt.close(figure)
+
+    figure.canvas.mpl_connect("button_press_event", click)
+    figure.canvas.mpl_connect("key_press_event", key)
+    plt.show(block=True)
+    return points if accepted else None
