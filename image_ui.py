@@ -28,11 +28,147 @@ class ToolPreview:
     original: NDArray[np.bool_] | None = None
     candidate_index: int | None = None
     edit_note: str = ""
+    disputed: NDArray[np.bool_] | None = None
 
 
 def candidate_color(index: int) -> tuple[float, float, float]:
     """Keep each candidate's color stable without wrapping a short palette."""
     return colorsys.hsv_to_rgb((0.59 + index * 0.618033988749895) % 1, 0.8, 0.92)
+
+
+def dispute_crops(disputed: NDArray[np.bool_]) -> list[tuple[int, int, int, int]]:
+    """Cover every disputed pixel with small crops and surrounding image context."""
+    height, width = disputed.shape
+    crops = []
+    for top in range(0, height, 256):
+        for left in range(0, width, 256):
+            ys, xs = np.nonzero(disputed[top : top + 256, left : left + 256])
+            if not len(xs):
+                continue
+            bounds = []
+            for low, high, limit in (
+                (left + int(xs.min()), left + int(xs.max()) + 1, width),
+                (top + int(ys.min()), top + int(ys.max()) + 1, height),
+            ):
+                size = min(limit, max(128, high - low + 64))
+                start = max(0, min((low + high - size) // 2, limit - size))
+                bounds.append((start, start + size))
+            crop = bounds[0][0], bounds[1][0], bounds[0][1], bounds[1][1]
+            if crop not in crops:
+                crops.append(crop)
+    return crops
+
+
+def show_overlap_review(
+    image: Image.Image, tools: Sequence[ToolPreview], title: str
+) -> None:
+    """Inspect original-pixel disputes before and after ordering, with linked zoom."""
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Patch
+
+    disputed = np.zeros((image.height, image.width), dtype=np.bool_)
+    for tool in tools:
+        if tool.disputed is not None:
+            disputed |= tool.disputed
+    crops = dispute_crops(disputed)
+    if not crops:
+        return
+    figure, axes = plt.subplots(1, 3, figsize=(15, 6), sharex=True, sharey=True)
+    region = 0
+    overlay_visible = True
+    overlays = []
+
+    def render() -> None:
+        overlays.clear()
+        for legend in list(figure.legends):
+            legend.remove()
+        left, top, right, bottom = crops[region]
+        extent = (left - 0.5, right - 0.5, bottom - 0.5, top - 0.5)
+        pixels = np.asarray(image.crop((left, top, right, bottom)).convert("RGB"))
+        for axis, label in zip(
+            axes, ["Original image", "Before ordering", "After ordering"], strict=True
+        ):
+            axis.clear()
+            axis.imshow(pixels, extent=extent, interpolation="nearest")
+            axis.set_title(label)
+            axis.set_xlabel("Image x (pixels)")
+        axes[0].set_ylabel("Image y (pixels)")
+        legend_handles = []
+        for index, tool in enumerate(tools):
+            source = (
+                tool.original
+                if tool.original is not None
+                and tool.disputed is not None
+                and tool.disputed.any()
+                else tool.mask
+            )
+            before = source[top:bottom, left:right]
+            after = tool.mask[top:bottom, left:right]
+            if not (before.any() or after.any()):
+                continue
+            color = candidate_color(
+                tool.candidate_index if tool.candidate_index is not None else index
+            )
+            legend_handles.append(
+                Patch(facecolor=color, label=f"Tool {tool.tool_id} — {tool.label}")
+            )
+            for axis, mask in zip(axes[1:], [before, after], strict=True):
+                overlay = np.zeros((*mask.shape, 4), dtype=np.uint8)
+                overlay[mask] = (*[round(channel * 255) for channel in color], 115)
+                overlays.append(
+                    axis.imshow(overlay, extent=extent, interpolation="nearest")
+                )
+                overlays[-1].set_visible(overlay_visible)
+        crop_disputed = disputed[top:bottom, left:right]
+        # Pad contours so even a dispute touching the crop edge has an outline.
+        for axis in axes[1:]:
+            axis.contour(
+                np.arange(left - 1, right + 1),
+                np.arange(top - 1, bottom + 1),
+                np.pad(crop_disputed, 1),
+                levels=[0.5],
+                colors=["magenta"],
+                linewidths=0.8,
+            )
+        axes[0].set_xlim(left - 0.5, right - 0.5)
+        axes[0].set_ylim(bottom - 0.5, top - 0.5)
+        figure.suptitle(
+            f"{title} — disputed region {region + 1}/{len(crops)}\n"
+            "Toolbar zoom/pan links all panels; [ / ] = previous/next; "
+            "m = toggle masks; Esc = close\n"
+            "Magenta outlines disputed pixels. Return to the terminal to accept or edit.",
+            fontsize=10,
+        )
+        figure.legend(
+            handles=legend_handles,
+            loc="lower center",
+            ncol=min(4, len(legend_handles)),
+            fontsize=9,
+        )
+        figure.subplots_adjust(left=0.06, right=0.98, bottom=0.18, top=0.77, wspace=0.12)
+        manager = figure.canvas.manager
+        if manager is not None and manager.toolbar is not None:
+            manager.toolbar.update()
+            manager.toolbar.push_current()
+        figure.canvas.draw_idle()
+
+    def on_key(event: KeyEvent) -> None:
+        nonlocal region, overlay_visible
+        if event.key in {"[", "]"}:
+            region = (region + (1 if event.key == "]" else -1)) % len(crops)
+            render()
+        elif event.key == "m":
+            overlay_visible = not overlay_visible
+            for overlay in overlays:
+                overlay.set_visible(overlay_visible)
+            figure.canvas.draw_idle()
+        elif event.key == "escape":
+            plt.close(figure)
+
+    figure.canvas.mpl_connect("key_press_event", on_key)
+    render()
+    plt.show(block=False)
+    plt.pause(0.001)
 
 
 def show_tool_review(
@@ -55,6 +191,7 @@ def show_tool_review(
         fontsize=10,
     )
     overview.axis("off")
+    disputed = np.zeros(overview_pixels.shape[:2], dtype=np.bool_)
     for index, candidate in enumerate(candidates):
         box = mask2xywh(candidate.mask)
         if box is None:
@@ -117,12 +254,31 @@ def show_tool_review(
             bbox={"facecolor": "black", "alpha": 0.7},
         )
         extent = tool.mask if tool.original is None else tool.mask | tool.original
+        if tool.disputed is not None:
+            extent = extent | tool.disputed
+            disputed |= tool.disputed
         left, top, right, bottom = tool_crop(extent)
         axis.imshow(image.crop((left, top, right, bottom)))
         crop_mask = tool.mask[top:bottom, left:right]
         overlay = np.zeros((*crop_mask.shape, 4), dtype=np.uint8)
         overlay[crop_mask] = (*[round(channel * 255) for channel in color], 115)
         axis.imshow(overlay, interpolation="nearest")
+        if tool.disputed is not None and tool.disputed.any():
+            axis.contour(
+                tool.disputed[top:bottom, left:right],
+                levels=[0.5],
+                colors=["magenta"],
+                linewidths=1,
+            )
+            axis.text(
+                0.02,
+                0.98,
+                "Magenta outline: disputed region",
+                transform=axis.transAxes,
+                va="top",
+                fontsize=8,
+                bbox={"facecolor": "white", "alpha": 0.8},
+            )
         if tool.original is not None and not np.array_equal(tool.original, tool.mask):
             axis.text(
                 0.02,
@@ -133,6 +289,8 @@ def show_tool_review(
                 bbox={"facecolor": "white", "alpha": 0.8},
             )
     overview.imshow(overview_pixels)
+    if disputed.any():
+        overview.contour(disputed, levels=[0.5], colors=["magenta"], linewidths=1)
     figure.subplots_adjust(
         left=0.03, right=0.98, bottom=0.06, top=0.88, wspace=0.15, hspace=0.3
     )

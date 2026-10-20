@@ -33,7 +33,13 @@ from masks import mask2xywh, save_mask_bundle
 from mask_cleanup import clean_mask, parse_cleanup
 from image_review import Candidate, review_image_instances
 from image_refinement import refine_tool
-from image_ui import candidate_color, collect_clicks, draw_tool_mask, show_tool_review
+from image_ui import (
+    candidate_color,
+    collect_clicks,
+    draw_tool_mask,
+    show_overlap_review,
+    show_tool_review,
+)
 from image_spatial import Sam3SpatialBackend
 
 
@@ -793,6 +799,7 @@ def annotate_images(args: argparse.Namespace) -> None:
                     key=key,
                     show=show_candidates,
                     show_tools=show_tool_review,
+                    inspect_order=show_overlap_review,
                     draw=draw_tool_mask,
                     collect_points=collect_clicks,
                     spatial=lambda points, seed: backend.spatial(image, points, seed),
@@ -881,6 +888,7 @@ def annotate_images(args: argparse.Namespace) -> None:
                     }
                     for candidate in selected
                 ],
+                depth_order_tool_ids=result.depth_order if explicit else [],
             )
         backend.refine_crop = original_refine
 

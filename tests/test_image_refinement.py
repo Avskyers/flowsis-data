@@ -422,3 +422,34 @@ def test_tool_preview_color_matches_candidate_and_survives_other_removal(monkeyp
         )
     finally:
         plt.close("all")
+
+
+def test_order_preview_outlines_disputes_without_hiding_resolved_masks(monkeypatch):
+    monkeypatch.setattr(plt, "show", lambda **_: None)
+    monkeypatch.setattr(plt, "pause", lambda _: None)
+    original = candidate((100, 120), (20, 20, 60, 60)).mask
+    disputed = np.zeros_like(original)
+    disputed[30:40, 50:60] = True
+    resolved = original & ~disputed
+    try:
+        show_tool_review(
+            Image.new("RGB", (120, 100)),
+            [],
+            "ordered",
+            [
+                ToolPreview(
+                    "12", "scissors", resolved, original,
+                    edit_note="Ordered mask — order reset to undo",
+                    disputed=disputed,
+                )
+            ],
+        )
+        overview, panel = plt.gcf().axes
+        assert len(overview.collections) == 1
+        assert len(panel.collections) == 1
+        assert any("Magenta outline" in text.get_text() for text in panel.texts)
+        assert any("order reset" in text.get_text() for text in panel.texts)
+        overlay = np.asarray(panel.images[1].get_array())
+        assert np.count_nonzero(overlay[:, :, 3]) == np.count_nonzero(resolved)
+    finally:
+        plt.close("all")

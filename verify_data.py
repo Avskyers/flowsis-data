@@ -17,7 +17,7 @@ from annotations import (
     parse_bool,
     validate_instance_metadata,
 )
-from masks import load_mask_bundle, mask2xywh
+from masks import load_mask_bundle, mask2xywh, mask_overlap
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps, UnidentifiedImageError
 
@@ -199,6 +199,10 @@ def validate_image_annotations(
         if len(paths) != 1:
             raise ValueError("Image instances must reference one shared mask bundle.")
         bundle = load_mask_bundle(ROOT / next(iter(paths)))
+        if len(bundle.masks) > 1 and mask_overlap(bundle.masks).any():
+            raise ValueError(
+                "Instance masks overlap. Reopen annotation and resolve their front-to-back order or correct the masks."
+            )
         if len(set(bundle.identities)) != len(bundle.identities):
             raise ValueError("Mask bundle contains duplicate instance identities.")
         indices = [int(row["Mask Index"]) for row in visible]

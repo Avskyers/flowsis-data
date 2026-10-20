@@ -110,3 +110,60 @@ def test_unversioned_mask_archive_is_rejected(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="Unversioned"):
         load_mask_bundle(path)
+
+
+def test_save_rejects_overlap_without_replacing_existing_bundle(tmp_path):
+    masks = np.zeros((2, 5, 6), dtype=np.bool_)
+    masks[0, 1:3, 1:3] = True
+    masks[1, 3:5, 3:5] = True
+    path = tmp_path / "masks.npz"
+    save_mask_bundle(path, masks, ["a", "b"])
+    before = path.read_bytes()
+    masks[1, 1, 1] = True
+    with pytest.raises(ValueError, match="Instance masks overlap"):
+        save_mask_bundle(path, masks, ["a", "b"])
+    assert path.read_bytes() == before
+
+
+def test_verifier_rejects_legacy_overlapping_bundle(tmp_path, monkeypatch):
+    import verify_data
+
+    masks = np.zeros((2, 5, 6), dtype=np.bool_)
+    masks[0, 1:3, 1:3] = True
+    masks[1, 2:4, 2:4] = True
+    path = tmp_path / "legacy.npz"
+    # Write a legacy bundle directly: new saves reject these annotations.
+    np.savez_compressed(
+        path,
+        format_version=np.asarray(2),
+        mask_shape=np.asarray(masks.shape),
+        bitorder=np.asarray("big"),
+        identities=np.asarray(["a", "b"]),
+        packed_masks=np.packbits(masks.reshape(2, -1), axis=1, bitorder="big"),
+        has_ignore=np.asarray(False),
+    )
+    np.testing.assert_array_equal(load_mask_bundle(path).masks, masks)
+    rows = resolved_image_rows(
+        [
+            {
+                "Image ID": "image",
+                "Instance ID": identity,
+                "Tool ID": str(index),
+                "Tool Class": "scissors",
+                "Tool Name": "iris",
+                "Confidence": "1",
+            }
+            for index, identity in enumerate(["a", "b"])
+        ],
+        [
+            Candidate(mask, 0.9, "scissors", identity)
+            for mask, identity in zip(masks, ["a", "b"])
+        ],
+        path,
+    )
+    monkeypatch.setattr(verify_data, "ROOT", tmp_path)
+    issues = verify_data.validate_image_annotations(
+        {"Filepath": "images/missing.jpg"}, rows
+    )
+    assert len(issues) == 1
+    assert "Instance masks overlap" in str(issues[0])

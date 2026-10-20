@@ -783,22 +783,22 @@ Tool IDs,Sample ID,Angle,Filepath,Lights,Make,Model,Flash,ISO,Exposure,Aperture,
 50,95,225,images/50/IMG_1807.jpg,FALSE,Apple,iPhone 17,FALSE,640,1/30,1.6,5.96,2026-10-09T17:10:56.715-04:00,image-3408161bea0cf410,session-2026-10-09-015
 50,95,270,images/50/IMG_1810.jpg,FALSE,Apple,iPhone 17,FALSE,640,1/32,1.6,5.96,2026-10-09T17:11:35.038-04:00,image-7dc56535d9106cc8,session-2026-10-09-015
 50,95,315,images/50/IMG_1811.jpg,FALSE,Apple,iPhone 17,FALSE,640,1/32,1.6,5.96,2026-10-09T17:12:21.801-04:00,image-8fb9ca77f5b87b79,session-2026-10-09-015
-0;3,,,images/multi/0/IMG_1957.jpg,,,,,,,,,,image-9a099d88fe68c199,session-unknown-001
-0;3,,,images/multi/0/IMG_1958.jpg,,,,,,,,,,image-001d97824ad577dd,session-unknown-002
-0;3,,,images/multi/0/IMG_1963.jpg,,,,,,,,,,image-edd7d227c148a68e,session-unknown-003
-0;3,,,images/multi/0/IMG_1964.jpg,,,,,,,,,,image-7ebfc0d51084d344,session-unknown-004
-0;3,,,images/multi/0/IMG_1965.jpg,,,,,,,,,,image-81bf5b923ec1c516,session-unknown-005
-0;3,,,images/multi/0/IMG_1967.jpg,,,,,,,,,,image-ddf6ed1e2704ae71,session-unknown-006
-0;3,,,images/multi/0/IMG_1968.jpg,,,,,,,,,,image-ac0aae21ef673b7c,session-unknown-007
-0;3,,,images/multi/0/IMG_1971.jpg,,,,,,,,,,image-0f08334cbdf244c9,session-unknown-008
-0;48,,,images/multi/1/IMG_1710.jpg,,,,,,,,,,image-cd0100d763c02ede,session-unknown-009
-0;48,,,images/multi/1/IMG_1711.jpg,,,,,,,,,,image-a80d4653394a067e,session-unknown-010
-0;48,,,images/multi/1/IMG_1713.jpg,,,,,,,,,,image-84ae18bcb1eff75d,session-unknown-011
-0;48,,,images/multi/1/IMG_1714.jpg,,,,,,,,,,image-ce728221d95133d4,session-unknown-012
-0;48,,,images/multi/1/IMG_1715.jpg,,,,,,,,,,image-bd75236f694e7357,session-unknown-013
-0;48,,,images/multi/1/IMG_1716.jpg,,,,,,,,,,image-8c74d0bb208a6d55,session-unknown-014
-0;48,,,images/multi/1/IMG_1719.jpg,,,,,,,,,,image-2396aeb3fe76b3bf,session-unknown-015
-0;48,,,images/multi/1/IMG_1720.jpg,,,,,,,,,,image-3edf9eecdb0b2bf2,session-unknown-016
+0;3,,,images/multi/0/IMG_1957.jpg,,Apple,iPhone 17,FALSE,640,1/30,1.6,5.96,2026-10-13T16:38:28.507-04:00,image-9a099d88fe68c199,session-unknown-001
+0;3,,,images/multi/0/IMG_1958.jpg,,Apple,iPhone 17,FALSE,640,1/31,1.6,5.96,2026-10-13T16:39:19.230-04:00,image-001d97824ad577dd,session-unknown-002
+0;3,,,images/multi/0/IMG_1963.jpg,,Apple,iPhone 17,FALSE,640,1/30,1.6,5.96,2026-10-13T16:41:32.356-04:00,image-edd7d227c148a68e,session-unknown-003
+0;3,,,images/multi/0/IMG_1964.jpg,,Apple,iPhone 17,FALSE,640,1/30,1.6,5.96,2026-10-13T16:42:03.185-04:00,image-7ebfc0d51084d344,session-unknown-004
+0;3,,,images/multi/0/IMG_1965.jpg,,Apple,iPhone 17,FALSE,640,1/30,1.6,5.96,2026-10-13T16:43:07.971-04:00,image-81bf5b923ec1c516,session-unknown-005
+0;3,,,images/multi/0/IMG_1967.jpg,,Apple,iPhone 17,FALSE,640,1/30,1.6,5.96,2026-10-13T16:44:12.965-04:00,image-ddf6ed1e2704ae71,session-unknown-006
+0;3,,,images/multi/0/IMG_1968.jpg,,Apple,iPhone 17,FALSE,640,1/31,1.6,5.96,2026-10-13T16:45:06.868-04:00,image-ac0aae21ef673b7c,session-unknown-007
+0;3,,,images/multi/0/IMG_1971.jpg,,Apple,iPhone 17,FALSE,640,1/30,1.6,5.96,2026-10-13T16:47:30.472-04:00,image-0f08334cbdf244c9,session-unknown-008
+0;48,,,images/multi/1/IMG_1710.jpg,,Apple,iPhone 17,FALSE,125,1/60,1.6,5.96,2026-10-07T16:55:28.959-04:00,image-cd0100d763c02ede,session-unknown-009
+0;48,,,images/multi/1/IMG_1711.jpg,,Apple,iPhone 17,FALSE,160,1/60,1.6,5.96,2026-10-07T16:55:49.922-04:00,image-a80d4653394a067e,session-unknown-010
+0;48,,,images/multi/1/IMG_1713.jpg,,Apple,iPhone 17,FALSE,160,1/60,1.6,5.96,2026-10-07T16:56:10.408-04:00,image-84ae18bcb1eff75d,session-unknown-011
+0;48,,,images/multi/1/IMG_1714.jpg,,Apple,iPhone 17,FALSE,160,1/60,1.6,5.96,2026-10-07T16:56:35.881-04:00,image-ce728221d95133d4,session-unknown-012
+0;48,,,images/multi/1/IMG_1715.jpg,,Apple,iPhone 17,FALSE,125,1/60,1.6,5.96,2026-10-07T16:56:45.723-04:00,image-bd75236f694e7357,session-unknown-013
+0;48,,,images/multi/1/IMG_1716.jpg,,Apple,iPhone 17,FALSE,160,1/60,1.6,5.96,2026-10-07T16:56:57.090-04:00,image-8c74d0bb208a6d55,session-unknown-014
+0;48,,,images/multi/1/IMG_1719.jpg,,Apple,iPhone 17,FALSE,125,1/60,1.6,5.96,2026-10-07T16:57:42.167-04:00,image-2396aeb3fe76b3bf,session-unknown-015
+0;48,,,images/multi/1/IMG_1720.jpg,,Apple,iPhone 17,FALSE,160,1/60,1.6,5.96,2026-10-07T16:58:25.664-04:00,image-3edf9eecdb0b2bf2,session-unknown-016
 4,,,images/4/IMG_2430.jpg,,Apple,iPhone 14 Pro Max,FALSE,160,1/60,1.78,6.86,2026-09-02T12:32:04.625-04:00,image-c729345a587a7e30,session-2026-09-02-001
 4,,,images/4/IMG_2431.jpg,,Apple,iPhone 14 Pro Max,FALSE,125,1/60,1.78,6.86,2026-09-02T12:32:13.799-04:00,image-f6c6336d4e6b88e3,session-2026-09-02-001
 4,,,images/4/IMG_2432.jpg,,Apple,iPhone 14 Pro Max,FALSE,125,1/60,1.78,6.86,2026-09-02T12:32:23.116-04:00,image-27fa784325966064,session-2026-09-02-001
@@ -944,3 +944,11 @@ Tool IDs,Sample ID,Angle,Filepath,Lights,Make,Model,Flash,ISO,Exposure,Aperture,
 17,,,images/17/IMG_2678.jpg,,Apple,iPhone 14 Pro Max,FALSE,1000,1/59,1.78,6.86,2026-09-03T13:37:19.555-04:00,image-7c9b9b8fb84819a0,session-2026-09-03-002
 17,,,images/17/IMG_2679.jpg,,Apple,iPhone 14 Pro Max,FALSE,800,1/60,1.78,6.86,2026-09-03T13:37:28.483-04:00,image-1102c326469d30c1,session-2026-09-03-002
 17,,,images/17/IMG_2680.jpg,,Apple,iPhone 14 Pro Max,FALSE,1000,1/58,1.78,6.86,2026-09-03T13:37:36.796-04:00,image-197b7390aaad4e77,session-2026-09-03-002
+23;26,,,images/multi/2/IMG_1945.jpg,,Apple,iPhone 17,FALSE,640,1/32,1.6,5.96,2026-10-13T16:20:58.789-04:00,image-ad23da26942c4f94,session-unknown-017
+23;26,,,images/multi/2/IMG_1946.jpg,,Apple,iPhone 17,FALSE,640,1/33,1.6,5.96,2026-10-13T16:21:59.620-04:00,image-fabe4ff9e9445640,session-unknown-018
+23;26,,,images/multi/2/IMG_1949.jpg,,Apple,iPhone 17,FALSE,640,1/34,1.6,5.96,2026-10-13T16:23:25.597-04:00,image-1de6c2442b8d3a6f,session-unknown-019
+23;26,,,images/multi/2/IMG_1950.jpg,,Apple,iPhone 17,FALSE,640,1/33,1.6,5.96,2026-10-13T16:24:14.632-04:00,image-de5d73a3575e0032,session-unknown-020
+23;26,,,images/multi/2/IMG_1952.jpg,,Apple,iPhone 17,FALSE,640,1/32,1.6,5.96,2026-10-13T16:25:23.056-04:00,image-e455e458d8da6d0b,session-unknown-021
+23;26,,,images/multi/2/IMG_1953.jpg,,Apple,iPhone 17,FALSE,640,1/32,1.6,5.96,2026-10-13T16:26:11.084-04:00,image-dd188eb079f77177,session-unknown-022
+23;26,,,images/multi/2/IMG_1955.jpg,,Apple,iPhone 17,FALSE,640,1/31,1.6,5.96,2026-10-13T16:29:18.343-04:00,image-b9f0cd372e20f2c8,session-unknown-023
+23;26,,,images/multi/2/IMG_1956.jpg,,Apple,iPhone 17,FALSE,640,1/31,1.6,5.96,2026-10-13T16:30:13.106-04:00,image-1d864a71202df6e6,session-unknown-024

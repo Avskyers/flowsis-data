@@ -33,6 +33,18 @@ def _packed_width(height: int, width: int) -> int:
     return (height * width + 7) // 8
 
 
+def mask_overlap(masks: NDArray[np.bool_]) -> NDArray[np.bool_]:
+    """Return pixels claimed by more than one instance, counting each pixel once."""
+    if masks.ndim != 3:
+        raise ValueError("masks must have shape [N, H, W].")
+    occupied = np.zeros(masks.shape[1:], dtype=np.bool_)
+    overlap = occupied.copy()
+    for mask in masks:
+        overlap |= occupied & mask
+        occupied |= mask
+    return overlap
+
+
 def save_mask_bundle(
     path: str | Path,
     masks: NDArray[np.bool_],
@@ -47,6 +59,10 @@ def save_mask_bundle(
         raise ValueError("masks must have shape [N, H, W].")
     if len(identities) != masks.shape[0]:
         raise ValueError("identities must have one value per mask.")
+    if masks.shape[0] > 1 and mask_overlap(masks).any():
+        raise ValueError(
+            "Instance masks overlap. Resolve visible-pixel ownership before saving."
+        )
     _, height, width = masks.shape
     packed_masks = np.packbits(
         masks.reshape(masks.shape[0], height * width),

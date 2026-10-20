@@ -15,6 +15,7 @@ from masks import load_mask_bundle
 
 @pytest.fixture(autouse=True)
 def use_mockable_image_preview(monkeypatch):
+    monkeypatch.setattr(annotate, "show_overlap_review", lambda *_: None)
     monkeypatch.setattr(
         annotate,
         "show_tool_review",
@@ -47,7 +48,14 @@ def candidates():
 
 
 def interactive_review(
-    monkeypatch, tmp_path, commands, rows=None, initial=None, predict=None
+    monkeypatch,
+    tmp_path,
+    commands,
+    rows=None,
+    initial=None,
+    predict=None,
+    show_tools=None,
+    inspect_order=None,
 ):
     commands = iter(commands)
     monkeypatch.setattr("builtins.input", lambda _: next(commands))
@@ -60,6 +68,8 @@ def interactive_review(
         show=lambda *args: None,
         predict=predict or (lambda _: []),
         log=log.append,
+        show_tools=show_tools,
+        inspect_order=inspect_order,
     )
     return result, [json.loads(line) for line in log.path.read_text().splitlines()]
 
@@ -73,6 +83,7 @@ def test_grouping_preserves_gaps_and_source_history(monkeypatch, tmp_path, capsy
             "g a 0,2",
             "v a partial",
             "g b 1",
+            "order 12 13",
             "a",
         ],
     )
@@ -103,6 +114,7 @@ def test_reprompt_preserves_assignments_and_resolves_extra_tool(monkeypatch, tmp
             "p forceps",
             'n c 14 "forceps" "fine forceps" 0.9',
             "g c 3",
+            "order 12 14",
             "a",
         ],
         predict=lambda _: [candidates()[1]],
@@ -161,7 +173,7 @@ def seed_known_tools(tool_ids):
     write_csv("image_object_manifest.csv", objects, IMAGE_OBJECT_FIELDS)
 
 
-def test_cli_saves_overlapping_tools_and_resumes(monkeypatch, tmp_path):
+def test_cli_saves_ordered_tools_and_resumes(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     setup_manifest(
         tmp_path,
@@ -188,17 +200,25 @@ def test_cli_saves_overlapping_tools_and_resumes(monkeypatch, tmp_path):
 
     monkeypatch.setattr(annotate, "Sam3ImageBackend", Backend)
     monkeypatch.setattr(annotate, "show_candidates", lambda *args: None)
-    commands = iter(["g a 0,1", "g b 2", "v c occluded", "a"])
+    commands = iter(["g a 0,1", "g b 2", "v c occluded", "a", "order 12 13", "a"])
     monkeypatch.setattr("builtins.input", lambda _: next(commands))
     annotate.main()
     assert prompts_seen == ["tool 12 scissors", "tool 13 scissors", "forceps"]
     bundle = load_mask_bundle("masks/images/tools.npz")
     assert bundle.identities == ("a", "b")
-    assert np.any(bundle.masks[0] & bundle.masks[1])
+    assert not np.any(bundle.masks[0] & bundle.masks[1])
+    source = candidates()[1].mask
+    np.testing.assert_array_equal(
+        bundle.masks[1], source & ~(candidates()[0].mask | candidates()[2].mask)
+    )
     rows = read_csv("image_object_manifest.csv")
     assert [row["Tool ID"] for row in rows] == ["12", "13", "14"]
     assert rows[2]["Visibility"] == "occluded"
     assert rows[2]["Mask Index"] == "-1"
+    records = [
+        json.loads(line) for line in Path("image_review.jsonl").read_text().splitlines()
+    ]
+    assert records[-1]["depth_order_tool_ids"] == ["12", "13"]
     monkeypatch.setattr(verify_data, "ROOT", tmp_path)
     assert not verify_data.validate_image_annotations(
         read_csv("image_manifest.csv")[0], rows
@@ -250,12 +270,13 @@ def test_high_iou_candidates_survive_until_review(monkeypatch, tmp_path):
         "show_candidates",
         lambda image, parts, key: displayed.append(len(parts)),
     )
-    commands = iter(["g a 0", "g b 1", "a"])
+    commands = iter(["g a 0", "g b 1", "order 12 13", "v 13 occluded", "x 1", "a"])
     monkeypatch.setattr("builtins.input", lambda _: next(commands))
     annotate.main()
     assert displayed[0] == 2
     bundle = load_mask_bundle("masks/images/tools.npz")
-    np.testing.assert_array_equal(bundle.masks[0], bundle.masks[1])
+    assert len(bundle.masks) == 1
+    np.testing.assert_array_equal(bundle.masks[0], mask)
 
 
 def test_declare_sample_preserves_metadata_and_reopen_clears_annotations(
@@ -523,7 +544,10 @@ def test_tool_ids_control_grouping_visibility_and_clearing(
     result, records = interactive_review(
         monkeypatch,
         tmp_path,
-        ["g 0", "g 99 0", "g 0 0,2", "u 0", "g 0 0,2", "v 0 partial", "g 3 1", "a"],
+        [
+            "g 0", "g 99 0", "g 0 0,2", "u 0", "g 0 0,2", "v 0 partial",
+            "g 3 1", "order 0 3", "a",
+        ],
         rows=[instance("internal-a", "0"), instance("internal-b", "3", "pliers")],
     )
     output = capsys.readouterr().out
@@ -546,13 +570,15 @@ def test_tool_id_takes_precedence_over_legacy_instance_id(monkeypatch, tmp_path)
     result, _ = interactive_review(
         monkeypatch,
         tmp_path,
-        ["g 0 0", "g 3 1", "a"],
+        ["g 0 0", "g 3 1", "order 0 3", "a"],
         rows=[instance("3", "0"), instance("0", "3", "pliers")],
         initial=candidates()[:2],
     )
     assert [candidate.identity for candidate in result.selected] == ["3", "0"]
     np.testing.assert_array_equal(result.selected[0].mask, candidates()[0].mask)
-    np.testing.assert_array_equal(result.selected[1].mask, candidates()[1].mask)
+    np.testing.assert_array_equal(
+        result.selected[1].mask, candidates()[1].mask & ~candidates()[0].mask
+    )
 
 
 def test_new_tool_command_generates_internal_instance_id(monkeypatch, tmp_path):
@@ -561,7 +587,7 @@ def test_new_tool_command_generates_internal_instance_id(monkeypatch, tmp_path):
     result, _ = interactive_review(
         monkeypatch,
         tmp_path,
-        ["g 0 0", 'n 3 "pliers" "rongeur" 0.9', "p rongeur", "g 3 1", "a"],
+        ["g 0 0", 'n 3 "pliers" "rongeur" 0.9', "p rongeur", "g 3 1", "order 0 3", "a"],
         rows=[instance("existing", "0")],
         initial=candidates()[:1],
         predict=lambda _: [candidates()[1]],
@@ -617,4 +643,251 @@ def test_declared_tools_display_name_class_label(monkeypatch, tmp_path, capsys):
     output = capsys.readouterr().out
     assert "tool 0 | iris scissors |" in output
     assert "tool 3 | mayo scissors |" in output
+    assert result.decision == "quit"
+
+
+def test_order_requires_confirmation_and_previews_disputed_pixels(
+    monkeypatch, tmp_path
+):
+    panels = []
+    result, records = interactive_review(
+        monkeypatch,
+        tmp_path,
+        ["g 12 0,2", "g 13 1", "order 13 12", "q"],
+        show_tools=lambda image, parts, title, tools: panels.append(tools),
+    )
+    assert result.decision == "quit"  # Ordering alone cannot accept/save an image.
+    front, back = candidates()[1].mask, candidates()[0].mask | candidates()[2].mask
+    np.testing.assert_array_equal(panels[-1][0].mask, back & ~front)
+    np.testing.assert_array_equal(panels[-1][1].mask, front)
+    np.testing.assert_array_equal(panels[-1][0].original, back)
+    np.testing.assert_array_equal(panels[-1][0].disputed, back & front)
+    assert panels[-1][0].edit_note == "Ordered mask — order reset to undo"
+    ordered = next(
+        record for record in records if record.get("action") == "overlap_order"
+    )
+    assert ordered["depth_order_tool_ids"] == ["13", "12"]
+    assert ordered["depth_order_instance_ids"] == ["b", "a"]
+    assert ordered["overlap_pixels"] == 4
+    assert ordered["removed_pixels"] == {"13": 0, "12": 4}
+
+
+def test_reordering_and_reset_use_source_masks(monkeypatch, tmp_path, capsys):
+    result, _ = interactive_review(
+        monkeypatch,
+        tmp_path,
+        [
+            "g 12 0,2", "g 13 1", "order 12 13", "order reset", "a",
+            "order 12 13", "order 13 12", "a",
+        ],
+    )
+    assert "Instance masks overlap" in capsys.readouterr().out
+    source_a = candidates()[0].mask | candidates()[2].mask
+    source_b = candidates()[1].mask
+    np.testing.assert_array_equal(result.selected[0].mask, source_a & ~source_b)
+    np.testing.assert_array_equal(result.selected[1].mask, source_b)
+    np.testing.assert_array_equal(
+        result.selected[0].mask | result.selected[1].mask, source_a | source_b
+    )
+    assert result.depth_order == ["13", "12"]
+
+
+@pytest.mark.parametrize(
+    "edit", ["g 12 0,2", "v 12 partial", "clean 12 holes 1", "p scissors"]
+)
+def test_editing_invalidates_order(monkeypatch, tmp_path, capsys, edit):
+    result, records = interactive_review(
+        monkeypatch, tmp_path,
+        ["g 12 0,2", "g 13 1", "order 12 13", edit, "a", "order 13 12", "a"],
+    )
+    output = capsys.readouterr().out
+    assert "Ordering cleared before editing" in output
+    assert "Instance masks overlap" in output
+    assert any(
+        record.get("action") == "overlap_order_invalidated" for record in records
+    )
+    assert result.depth_order == ["13", "12"]
+
+
+def test_invalid_orders_and_fully_erased_tools_do_not_change_masks(
+    monkeypatch, tmp_path, capsys
+):
+    panels = []
+    result, _ = interactive_review(
+        monkeypatch, tmp_path,
+        [
+            "g 12 0", "g 13 1", "order", "order 12 12", "order 99 12",
+            "order 12", "order 12 13", "s",
+        ],
+        initial=[candidates()[0], candidates()[0]],
+        show_tools=lambda image, parts, title, tools: panels.append(tools),
+    )
+    output = capsys.readouterr().out
+    assert "List each Tool ID once" in output
+    assert "Unknown Tool ID in order" in output
+    assert "missing: 13" in output
+    assert "Ordering would erase tool 13" in output
+    for tool in panels[-1]:
+        np.testing.assert_array_equal(tool.mask, candidates()[0].mask)
+    assert result.decision == "skipped"
+
+
+def test_order_only_requires_overlapping_tools_and_preserves_unrelated_masks(
+    monkeypatch, tmp_path
+):
+    parts = candidates()
+    unrelated = np.zeros_like(parts[0].mask)
+    unrelated[0, 10] = True
+    parts[2] = Candidate(unrelated, 0.9, "forceps", "candidate-2")
+    result, _ = interactive_review(
+        monkeypatch, tmp_path,
+        ["g 12 0", "g 13 1", "g 14 2", "order 12 13", "a"],
+        initial=parts,
+        rows=[instance("a", "12"), instance("b", "13"), instance("c", "14")],
+    )
+    np.testing.assert_array_equal(result.selected[2].mask, unrelated)
+    assert result.depth_order == ["12", "13"]
+
+
+def test_three_way_order_preserves_union_and_unique_pixels(monkeypatch, tmp_path):
+    masks = np.zeros((3, 10, 12), dtype=np.bool_)
+    masks[0, 1:6, 1:6] = True
+    masks[1, 3:8, 3:8] = True
+    masks[2, 4:9, 4:9] = True
+    result, records = interactive_review(
+        monkeypatch, tmp_path,
+        ["g 12 0", "g 13 1", "g 14 2", "order 12 13 14", "a"],
+        initial=[
+            Candidate(mask, 0.9, "tools", str(index))
+            for index, mask in enumerate(masks)
+        ],
+        rows=[instance("a", "12"), instance("b", "13"), instance("c", "14")],
+    )
+    actual = np.stack([part.mask for part in result.selected])
+    np.testing.assert_array_equal(actual[0], masks[0])
+    np.testing.assert_array_equal(actual[1], masks[1] & ~masks[0])
+    np.testing.assert_array_equal(actual[2], masks[2] & ~(masks[0] | masks[1]))
+    np.testing.assert_array_equal(actual.any(axis=0), masks.any(axis=0))
+    assert (actual.sum(axis=0) <= 1).all()
+    ordered = next(
+        record for record in records if record.get("action") == "overlap_order"
+    )
+    assert ordered["overlap_pixels"] == int(np.count_nonzero(masks.sum(axis=0) > 1))
+
+
+def test_nonoverlapping_masks_need_no_order(monkeypatch, tmp_path, capsys):
+    result, records = interactive_review(
+        monkeypatch, tmp_path,
+        ["g 12 0", "g 13 1", "order 12 13", "a"],
+        initial=[candidates()[0], candidates()[2]],
+    )
+    assert "ordering is unnecessary" in capsys.readouterr().out
+    assert result.decision == "accepted"
+    assert result.depth_order == []
+    assert not any(record.get("action") == "overlap_order" for record in records)
+
+
+def test_impossible_order_rejects_image_without_saving(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    setup_manifest(tmp_path, [instance("a", "12"), instance("b", "13")])
+    monkeypatch.setattr(sys, "argv", ["annotate.py", "images"])
+
+    class Backend:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def predict(self, images, prompts):
+            return [candidates()[:2] for _ in images]
+
+    monkeypatch.setattr(annotate, "Sam3ImageBackend", Backend)
+    monkeypatch.setattr("builtins.input", lambda _: "order impossible")
+    monkeypatch.setattr(annotate, "show_candidates", lambda *_: None)
+    annotate.main()
+    assert not list(tmp_path.rglob("*.npz"))
+    assert all(
+        not row["Annotation Complete"] for row in read_csv("image_object_manifest.csv")
+    )
+    records = [
+        json.loads(line) for line in Path("image_review.jsonl").read_text().splitlines()
+    ]
+    assert records[0]["action"] == "incompatible_depth_order"
+    assert records[-1]["decision"] == "rejected"
+
+
+def test_failed_reorder_retains_previous_result(monkeypatch, tmp_path, capsys):
+    small = candidates()[0].mask
+    large = small | candidates()[1].mask
+    result, _ = interactive_review(
+        monkeypatch,
+        tmp_path,
+        ["g 12 0", "g 13 1", "order 12 13", "order 13 12", "a"],
+        initial=[
+            Candidate(small, 0.9, "tools", "a"), Candidate(large, 0.9, "tools", "b")
+        ],
+    )
+    assert "Ordering would erase tool 12" in capsys.readouterr().out
+    assert result.depth_order == ["12", "13"]
+    np.testing.assert_array_equal(result.selected[0].mask, small)
+    np.testing.assert_array_equal(result.selected[1].mask, large & ~small)
+
+
+def test_ordered_masks_recompute_boxes_and_preserve_ignore_regions(
+    monkeypatch, tmp_path
+):
+    top = np.zeros((10, 12), dtype=np.bool_)
+    back = top.copy()
+    top[1:6, 1:5] = True
+    back[1:6, 3:8] = True
+    ignore = top.copy()
+    ignore[9, 11] = True
+    result, _ = interactive_review(
+        monkeypatch,
+        tmp_path,
+        ["g 12 0", "g 13 1", "i 2", "order 12 13", "a"],
+        initial=[
+            Candidate(mask, 0.9, "tools", str(index))
+            for index, mask in enumerate([top, back, ignore])
+        ],
+    )
+    rows = annotate.resolved_image_rows(
+        result.instances, result.selected, Path("masks.npz")
+    )
+    fields = ["BBox X", "BBox Y", "BBox Width", "BBox Height"]
+    assert [rows[1][field] for field in fields] == [5, 1, 3, 5]
+    np.testing.assert_array_equal(result.ignored[0].mask, ignore)
+
+
+def test_inspect_opens_automatically_after_order_and_reopens_without_editing(
+    monkeypatch, tmp_path
+):
+    inspections = []
+    result, records = interactive_review(
+        monkeypatch,
+        tmp_path,
+        ["g 12 0,2", "g 13 1", "order 13 12", "inspect", "a"],
+        inspect_order=lambda image, tools, title: inspections.append(tools),
+    )
+    assert len(inspections) == 2
+    assert result.decision == "accepted"
+    assert result.depth_order == ["13", "12"]
+    for previews in inspections:
+        np.testing.assert_array_equal(previews[0].mask, result.selected[0].mask)
+        np.testing.assert_array_equal(
+            previews[0].original, candidates()[0].mask | candidates()[2].mask
+        )
+        assert previews[0].disputed.any()
+    assert sum(record.get("action") == "inspect_order" for record in records) == 2
+    assert not any(record.get("action") == "overlap_order_invalidated" for record in records)
+
+
+def test_inspect_requires_an_order_and_never_accepts_by_itself(monkeypatch, tmp_path, capsys):
+    inspections = []
+    result, _ = interactive_review(
+        monkeypatch,
+        tmp_path,
+        ["inspect", "g 12 0,2", "g 13 1", "order 12 13", "inspect", "q"],
+        inspect_order=lambda *args: inspections.append(args),
+    )
+    assert "Use inspect after setting" in capsys.readouterr().out
+    assert len(inspections) == 2
     assert result.decision == "quit"
