@@ -17,6 +17,7 @@ from annotations import (
 )
 from image_ui import ToolPreview
 from mask_cleanup import clean_mask, parse_cleanup
+from masks import mask_overlap
 
 
 @dataclass(frozen=True)
@@ -34,6 +35,7 @@ class ImageReview:
     instances: list[dict[str, str]]
     selected: list[Candidate]
     ignored: list[Candidate]
+    depth_order: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -73,6 +75,9 @@ def review_image_instances(
         Callable[[Image.Image, Sequence[Candidate], str, Sequence[ToolPreview]], None]
         | None
     ) = None,
+    inspect_order: (
+        Callable[[Image.Image, Sequence[ToolPreview], str], None] | None
+    ) = None,
 ) -> ImageReview:
     import matplotlib.pyplot as plt
 
@@ -88,10 +93,17 @@ def review_image_instances(
     click_prompts: dict[int, ClickPrompt] = {}
     generated: set[int] = set()
     removed: set[int] = set()
+    ordered: dict[str, Candidate] = {}
+    depth_order: list[str] = []
+    inspect_pending = False
     blank = np.zeros((image.height, image.width), dtype=np.bool_)
 
-    def assigned_candidate(row: dict[str, str], *, original: bool = False) -> Candidate:
+    def assigned_candidate(
+        row: dict[str, str], *, original: bool = False, apply_order: bool = True
+    ) -> Candidate:
         identity = row["Instance ID"]
+        if not original and apply_order and identity in ordered:
+            return ordered[identity]
         if not original and identity in cleaned:
             return replace(cleaned[identity], visibility=states.get(identity, "clear"))
         if not original and identity in refinements:
@@ -145,6 +157,7 @@ def review_image_instances(
             ignored=sorted(ignored),
             removed=sorted(removed),
             cleaned=sorted(cleaned),
+            depth_order_tool_ids=list(depth_order),
             refinements={
                 identity: {"prompt": candidate.prompt, "score": candidate.score}
                 for identity, candidate in refinements.items()
@@ -152,6 +165,14 @@ def review_image_instances(
         )
 
     while True:
+        raw_selected = [assigned_candidate(row, apply_order=False) for row in instances]
+        overlap = mask_overlap(np.stack([part.mask for part in raw_selected]))
+        overlap_pixels = int(np.count_nonzero(overlap))
+        overlapping_tools = [
+            row["Tool ID"]
+            for row, part in zip(instances, raw_selected, strict=True)
+            if np.any(part.mask & overlap)
+        ]
         labels = []
         tools = {row["Instance ID"]: row["Tool ID"] for row in instances}
         for index, candidate in enumerate(candidates):
@@ -173,34 +194,60 @@ def review_image_instances(
             elif index in excluded:
                 owner = "excluded"
             labels.append(replace(candidate, prompt=f"{candidate.prompt} [{owner}]"))
-        if show_tools is None:
-            show(image, labels, key)
-        else:
-            previews = [
+        previews = []
+        for row, source in zip(instances, raw_selected, strict=True):
+            identity = row["Instance ID"]
+            original = None
+            edit_note = ""
+            if identity in ordered:
+                original = source.mask
+                edit_note = "Ordered mask — order reset to undo"
+            elif identity in refinements or identity in cleaned:
+                original = assigned_candidate(row, original=True).mask
+                if identity in cleaned:
+                    edit_note = f"Cleaned mask — unclean {row['Tool ID']} to undo"
+            previews.append(
                 ToolPreview(
                     row["Tool ID"],
                     canonical_tool_label(row["Tool Name"], row["Tool Class"], {}),
                     assigned_candidate(row).mask,
-                    (
-                        assigned_candidate(row, original=True).mask
-                        if row["Instance ID"] in refinements
-                        or row["Instance ID"] in cleaned
-                        else None
-                    ),
-                    edit_note=(
-                        f"Cleaned mask — unclean {row['Tool ID']} to undo"
-                        if row["Instance ID"] in cleaned
-                        else ""
-                    ),
+                    original,
+                    edit_note=edit_note,
                     candidate_index=(
-                        assignments[row["Instance ID"]][0]
-                        if assignments.get(row["Instance ID"])
-                        else None
+                        assignments[identity][0] if assignments.get(identity) else None
                     ),
+                    disputed=source.mask & overlap if overlap_pixels else None,
                 )
-                for row in instances
-            ]
+            )
+        if show_tools is None:
+            if ordered:
+                show(
+                    image,
+                    [
+                        replace(assigned_candidate(row), prompt=f"tool {row['Tool ID']}")
+                        for row in instances
+                    ],
+                    f"{key} — resolved tool masks (source candidate numbers unchanged)",
+                )
+            else:
+                show(image, labels, key)
+        else:
             show_tools(image, labels, key, previews)
+        if inspect_pending and inspect_order is not None:
+            inspect_order(image, previews, key)
+            record("inspect_order")
+        inspect_pending = False
+        if depth_order:
+            print(
+                f"Front-to-back order: {' > '.join(depth_order)}. "
+                "Inspect the close-ups, then 'a' to accept; 'inspect' reopens them; 'order reset' undoes ordering."
+            )
+        elif overlap_pixels:
+            print(
+                f"Overlap: {overlap_pixels} pixels claimed by tools {', '.join(overlapping_tools)}. "
+                "Correct boundaries or use 'order TOOL_ID ...' from front to back. "
+                "Use 'order impossible' to reject an arrangement without a consistent order."
+            )
         print(
             f"Mask candidates: {len(candidates) - len(removed)} active (numbers match the preview)"
         )
@@ -271,6 +318,8 @@ def review_image_instances(
             "draw TOOL_ID=trace/edit a mask; subtract TOOL_ID BASE_INDEX OTHER_TOOL_IDS=derive remainder; "
             "clean TOOL_ID [OP SIZE]=optional cleanup; unclean TOOL_ID=undo cleanup; "
             "refine TOOL_ID [TEXT]|all=crop refinement; restore TOOL_ID|all=original mask; "
+            "order TOOL_ID ...=front-to-back overlap resolution; order reset=undo; order impossible=reject arrangement; "
+            "inspect=reopen ordered overlap close-ups; "
             "remove 0,2=discard candidates; x 0,2=exclude; i 0,2=ignore; p TEXT=add predictions; "
             'n TOOL_ID "CLASS" "NAME" CONFIDENCE=declare extra tool; '
             "a=accept; e=all absent; s=skip; r=reject; q=quit"
@@ -279,6 +328,37 @@ def review_image_instances(
         plt.close("all")
         command, _, argument = response.partition(" ")
         try:
+            if depth_order and command in {
+                "n",
+                "p",
+                "draw",
+                "subtract",
+                "click",
+                "polygon",
+                "clean",
+                "unclean",
+                "refine",
+                "restore",
+                "g",
+                "u",
+                "v",
+                "remove",
+                "x",
+                "i",
+                "e",
+            }:
+                log(
+                    key,
+                    "in_progress",
+                    action="overlap_order_invalidated",
+                    depth_order_tool_ids=list(depth_order),
+                    command=command,
+                )
+                ordered.clear()
+                depth_order.clear()
+                print(
+                    "Ordering cleared before editing. Resolve any overlaps again before accepting."
+                )
             if command in {"q", "s", "r"}:
                 record(command)
                 return ImageReview(
@@ -287,7 +367,81 @@ def review_image_instances(
                     [],
                     [],
                 )
-            if command == "n":
+            if command == "inspect":
+                if argument or not depth_order:
+                    raise ValueError("Use inspect after setting a front-to-back order.")
+                if inspect_order is None:
+                    raise ValueError("Overlap inspection is unavailable in this reviewer.")
+                inspect_pending = True
+            elif command == "order":
+                if argument.strip() == "reset":
+                    ordered.clear()
+                    depth_order.clear()
+                    record("reset_overlap_order")
+                    continue
+                if argument.strip() == "impossible":
+                    record("incompatible_depth_order")
+                    return ImageReview("rejected", instances, [], [])
+                tool_ids = argument.replace(",", " ").split()
+                by_tool = {
+                    row["Tool ID"]: part
+                    for row, part in zip(instances, raw_selected, strict=True)
+                }
+                if not tool_ids or len(set(tool_ids)) != len(tool_ids):
+                    raise ValueError(
+                        "List each Tool ID once, front to back: order TOOL_ID ..."
+                    )
+                if any(tool_id not in by_tool for tool_id in tool_ids):
+                    raise ValueError(
+                        "Unknown Tool ID in order. Use the declared physical Tool IDs."
+                    )
+                if any(not by_tool[tool_id].mask.any() for tool_id in tool_ids):
+                    raise ValueError(
+                        "Only tools with assigned visible masks can be ordered."
+                    )
+                missing = set(overlapping_tools) - set(tool_ids)
+                if missing:
+                    raise ValueError(
+                        f"Include every overlapping tool in the order; missing: {', '.join(sorted(missing))}."
+                    )
+                if not overlap_pixels:
+                    raise ValueError(
+                        "No assigned instance masks overlap; ordering is unnecessary."
+                    )
+                resolved: dict[str, Candidate] = {}
+                removed_pixels: dict[str, int] = {}
+                occupied = blank.copy()
+                for tool_id in tool_ids:
+                    source = by_tool[tool_id]
+                    mask = source.mask & ~occupied
+                    if not mask.any():
+                        raise ValueError(
+                            f"Ordering would erase tool {tool_id}. Correct duplicate masks, change the order, "
+                            f"or explicitly mark 'v {tool_id} occluded' if fully hidden. Previous order retained."
+                        )
+                    resolved[source.identity] = replace(source, mask=mask)
+                    removed_pixels[tool_id] = int(
+                        np.count_nonzero(source.mask & occupied)
+                    )
+                    occupied |= source.mask
+                ordered = resolved
+                depth_order = tool_ids
+                inspect_pending = True
+                log(
+                    key,
+                    "in_progress",
+                    action="overlap_order",
+                    depth_order_tool_ids=list(depth_order),
+                    depth_order_instance_ids=[
+                        by_tool[tool_id].identity for tool_id in tool_ids
+                    ],
+                    overlap_pixels=overlap_pixels,
+                    removed_pixels=removed_pixels,
+                )
+                print(
+                    "Ordering applied to disputed pixels only. Inspect the preview before 'a'; edits clear the order."
+                )
+            elif command == "n":
                 fields = shlex.split(argument)
                 if len(fields) == 4:
                     tool_id, tool_class, name, confidence = fields
@@ -843,12 +997,19 @@ def review_image_instances(
                         f"Assign, exclude, or ignore candidates {sorted(unresolved)}."
                     )
                 selected = [assigned_candidate(row) for row in instances]
+                if mask_overlap(np.stack([part.mask for part in selected])).any():
+                    raise ValueError(
+                        "Instance masks overlap. Correct boundaries or use 'order TOOL_ID ...' "
+                        "from front to back, inspect the result, then 'a'. "
+                        "Use 'order impossible' to reject incompatible arrangements."
+                    )
                 record("resolved")
                 return ImageReview(
                     "accepted",
                     instances,
                     selected,
                     [candidates[index] for index in sorted(ignored)],
+                    list(depth_order),
                 )
             else:
                 raise ValueError("Invalid review command.")

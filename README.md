@@ -42,6 +42,11 @@ Use unique setup folder names. For multi-tool captures, moving or rotating the
 included tools stays in the same setup. Changing the tool set or overall capture
 conditions starts a new setup. Folder names organize captures;
 physical tool identities for multi-tool images belong in the object manifest.
+Collect overlapping tools so they have a consistent front-to-back order: a tool
+must not pass above another in one place and below it elsewhere. Avoid interwoven
+arrangements. During review, reject incompatible arrangements with
+`order impossible`, or skip them with `s` for later review. Ignore regions are
+for uncertain pixels, not a substitute for resolving an incompatible arrangement.
 The converter preserves subdirectories, so
 `raw-images/multi/setup-001/IMG_1001.HEIC` becomes
 `images/multi/setup-001/IMG_1001.jpg`.
@@ -377,6 +382,8 @@ retained for explicit review, including possible duplicates and overlapping
 masks. Automatic crop refinement is disabled for batches containing multi-tool
 images and for additional prompts entered during explicit review. After assigning
 masks, use the explicit per-tool crop refinement described below.
+Predictions may overlap, but accepted instance masks must not share pixels.
+Resolve any remaining overlaps after corrections using the ordering step below.
 
 The interface uses a Matplotlib image preview and terminal commands. The preview
 shows colored, numbered masks, bounding boxes, prompts, model scores, and current
@@ -444,6 +451,76 @@ tools use consistent colors in the overview and their crop panels; original
 image context remains visible around each tool, including overlapping tools.
 Panels without an assigned visible mask show a placeholder.
 
+#### Resolve overlapping masks with tool order
+
+After assigning and correcting the masks, the reviewer reports the number of
+pixels claimed by multiple tools and lists the affected Tool IDs. Magenta
+outlines mark disputed regions in the overview and tool panels. Non-overlapping
+masks can be accepted directly; `a` blocks acceptance while any instance masks
+still overlap.
+
+Use `order` with physical Tool IDs **from front to back**. Include every tool
+involved in any overlap; unrelated tools can be omitted. For example, tool 3
+is above tool 0:
+
+```text
+review> g 0 0
+review> g 3 1
+review> refine all
+review> order 3 0
+review> a
+```
+
+At each disputed pixel, the first listed tool claiming it keeps that pixel;
+lower tools lose it. Pixels claimed by only one tool remain unchanged. This
+does not fill gaps, infer hidden surfaces, or change the source candidates.
+Visibility remains the reviewer's decision; set `partial` or `severe` when
+appropriate before ordering. Bounding boxes are recomputed from the final masks
+when accepted.
+
+Ordering updates the tool panels but **does not accept the image**. Inspect the
+colored masks around the magenta outlines, then enter `a` separately. A second
+window opens automatically after every successful `order ...`, showing close-ups
+of the disputed regions. Each close-up has three linked panels: the original
+image without overlays, the masks before ordering, and final pixel ownership
+after ordering. Crops use the original image pixels with nearest-neighbor
+display; they are not downscaled preview files.
+
+Use the Matplotlib toolbar to zoom or pan: all three panels move together so
+you can compare exactly the same pixels. Press `]` for the next disputed region
+and `[` for the previous one. Disputes spread across the image or a large area
+are split into small crops with surrounding context, so even a few conflicting
+pixels can be examined closely. Press `m` to hide/show the colored masks, or
+Esc to close the inspection window. These keys act on the focused figure,
+not the terminal. Closing the viewer does not accept the annotation.
+
+Enter `inspect` at the review prompt to reopen the close-ups without changing
+the masks or invalidating the order. After inspecting all regions, enter `a`
+in the terminal to accept, or change/reset the order or edit the masks. An
+incorrect upper-tool boundary can still cut valid pixels out of the lower tool,
+so correct boundaries before ordering. The tool panels show the resolved masks;
+the terminal's candidate assignments still refer to the unchanged source masks.
+
+`order reset` restores the masks from before ordering, including their current
+refinements and cleanup. Enter another `order ...` to change the order; each
+attempt starts from those same masks, so subtraction does not accumulate.
+Starting any editing command (assignment, visibility, refinement, cleanup,
+spatial edits, candidate removal/exclusion/ignore, declarations, or new prompts)
+clears the order before the edit, even if the edit is cancelled or invalid.
+Resolve any resulting overlaps again and review before accepting. Skip, reject,
+and quit do not save the ordered masks.
+
+An order cannot silently erase a tool's whole mask. If this would happen, the
+command reports the tool and retains the previous order. Fix duplicate or
+incorrect assignments, choose another physically correct order, or explicitly
+mark a genuinely fully hidden tool with `v TOOL_ID occluded` and resolve its
+unused candidates. Never mark a visible tool occluded just to pass validation.
+
+If tools pass over and under each other, a global order is not valid. Use
+`order impossible` to reject the image and record the reason, or `s` to leave it
+unfinished. Physical depth cannot be inferred reliably from prediction overlap:
+side-by-side tools with overlapping predictions need boundary corrections.
+
 After assigning the masks, refine tools individually or together:
 
 ```text
@@ -492,6 +569,11 @@ review> subtract 0 0 3
 review> x 0
 review> a
 ```
+
+Keep `subtract` for intermediate mask construction: its result is an editable
+candidate that can be inspected, refined, or corrected further. `order` serves
+the final ownership check across assigned tool masks and does not create a new
+candidate. Using `subtract` does not bypass the final non-overlap requirement.
 
 For model-assisted separation, **start with `click 3`** rather than tracing an
 exact mask. Left-click visible pixels of tool 3 (foreground), and right-click
@@ -654,13 +736,17 @@ These controls currently apply to image review.
 | `unclean TOOL_ID` | Undo all cleanup for this tool, preserving its crop refinement and assignment. |
 | `refine TOOL_ID [TEXT]` / `refine all` | Refine assigned tools using crops of the original image; inspect the updated panels. |
 | `restore TOOL_ID` / `restore all` | Discard cleanup and crop refinements and restore the original assigned masks. |
+| `order TOOL_ID ...` | Resolve overlapping pixels from front to back; include all overlapping tools, inspect the result, then accept separately. |
+| `order reset` | Undo ordering while preserving source assignments, refinements, and cleanup. |
+| `order impossible` | Reject an arrangement without a consistent front-to-back order and record the reason. |
+| `inspect` | Reopen the original/before/after dispute close-ups after ordering; linked zoom/pan and inspection do not alter the masks or order. |
 | `v TOOL_ID partial` | Set `clear`, `partial`, `severe`, `occluded`, or `absent`. Occluded means fully hidden; absent means not in the image. |
 | `remove 1,3` | Discard candidates from the preview and active list without renumbering; affected tools become unresolved. |
 | `x 1,3` | Exclude false or duplicate candidates, retaining them for possible reassignment. |
 | `i 1,3` | Add candidates to the shared ignore region. |
 | `p forceps` | Append predictions using another prompt while preserving existing assignments. |
 | `n TOOL_ID "CLASS" "NAME" CONFIDENCE` | Declare an unexpected tool with complete metadata. Quote multiword class/name values. |
-| `a` | Accept after every tool and candidate is resolved. |
+| `a` | Accept after every tool and candidate is resolved and final instance masks are non-overlapping. |
 | `e` | Accept an empty image: explicitly mark all declared tools absent and exclude remaining candidates. |
 | `s`, `r`, `q` | Skip, reject, or quit. |
 
@@ -673,9 +759,11 @@ not infer physical identities or create unnamed reviewed tools.
 Final masks describe **visible surfaces**. Grouping disconnected fragments takes
 their pixelwise union without filling gaps or inventing hidden geometry. The
 result occupies one mask entry and one object row, with a bounding box around
-all its visible fragments. Separate tools retain independent masks, including
-overlapping pixels when supplied by the reviewer. Review the crossing regions
-carefully to avoid labeling hidden surfaces.
+all its visible fragments. Separate tools retain independent masks with no
+shared pixels. Correct boundaries or resolve disputed ownership with `order`
+before accepting; review crossing regions carefully to avoid labeling hidden
+surfaces. Overlaps between fragments assigned to the same tool are combined by
+union and do not require ordering.
 
 The CSV columns and version-2 `[N, H, W]` mask-bundle layout are unchanged.
 Visible rows reference their declared Instance ID and exact bundle index. Absent
@@ -688,11 +776,24 @@ resolution of every tool, including these nonvisible tools.
 
 Assignments and fragment grouping are recorded in `image_review.jsonl`, with
 source candidate IDs, indices, prompts, scores, and per-tool visibility. The
-final mask bundle does not preserve fragments separately. Skipped/quit images
+log also records front-to-back Tool IDs and Instance IDs, the number of disputed
+pixels, per-tool removed-pixel counts, resets, invalidation by later edits, and
+rejection of incompatible arrangements. Accepted decisions include the final
+ordered Tool IDs; that list is empty when no ordering was needed. Ordering is
+session-local, just like assignments.
+The final mask bundle does not preserve fragments separately. Skipped/quit images
 restart candidate generation and assignments on the next run; the log retains
 previous actions for audit but does not restore an unfinished editing session.
 The verifier checks completed rows for unresolved instances, invalid flags,
-mask identity/index mismatches, bounding boxes, and image dimensions.
+mask identity/index mismatches, overlapping instance pixels, bounding boxes, and
+image dimensions. Saving also rejects overlapping instance masks. Ignore regions
+are separate from instance ownership and may overlap instance masks; the
+non-overlap requirement applies between different tool instances.
+
+Existing mask bundles are not automatically rewritten. Legacy overlapping
+bundles remain readable for inspection, but verification now reports them as
+invalid and they must be reannotated before use under this policy. The version-2
+NPZ layout and CSV columns remain unchanged.
 
 ### Single-tool video prototype
 
